@@ -24,7 +24,6 @@
 import BitsList from "./BitsList";
 import AdHoc from "../AdHoc";
 
-
 export namespace BitsNullList {
     /**
      * Abstract class representing a read-only list of bits that supports null (or undefined) values.
@@ -49,8 +48,8 @@ export namespace BitsNullList {
          * @param sizeOrCapacity Combined size/capacity argument:
          *                       • positive → initial logical size (that many slots, each
          *                         pre-filled with `defaultValue`).
-         *                       • negative → capacity only (`-sizeOrCapacity` items reserved);
-         *                         logical size stays 0.
+         *                       • negative → logical size `-sizeOrCapacity`, NOT filled (raw 0, as
+         *                         `BitsList`); the room only: `RW.withCapacity`.
          *                       • zero / omitted → empty list.
          * @param defaultValue   Value used to fill new slots when the list expands. Defaults
          *                       to `undefinedValue` so freshly extended slots read as UNDEFINED.
@@ -60,9 +59,8 @@ export namespace BitsNullList {
          */
         protected constructor(bitsPerItem: number, undefinedValue: number, sizeOrCapacity: number = 0, defaultValue: number = undefinedValue) {
             super(bitsPerItem, defaultValue, sizeOrCapacity); // BitsList (bits, default, size): a negative size is not filled...
-            if (sizeOrCapacity < 0) this._size = 0; // ...and here a negative value is a capacity only
-            if ((undefinedValue & this.mask) !== undefinedValue)
-                throw new RangeError(`undefinedValue ${undefinedValue} does not fit in ${bitsPerItem} bits`);
+            // ...a negative size here too: `-size` items, not filled ( a receiver writes them all ); the room only - withCapacity
+            if ((undefinedValue & this.mask) !== undefinedValue) throw new RangeError(`undefinedValue ${undefinedValue} does not fit in ${bitsPerItem} bits`);
             this.undefinedValue = undefinedValue;
         }
 
@@ -70,7 +68,9 @@ export namespace BitsNullList {
          * Gets the last element in the list. Returns `undefined` if the last element is the null value.
          * @returns {(number | undefined)} The last element in the list, or `undefined` if it's a null value or the list is empty.
          */
-        get last(): number | undefined {return this.get(this._size - 1);} // get() maps the null sentinel to `undefined`.
+        get last(): number | undefined {
+            return this.get(this._size - 1);
+        } // get() maps the null sentinel to `undefined`.
 
         /**
          * Checks if the list contains the specified value (including undefined/null).
@@ -78,9 +78,7 @@ export namespace BitsNullList {
          * @returns {boolean} True if the value is found in the list, false otherwise.
          */
         contains(value: number | undefined): boolean {
-            return -1 < super._indexOf(value === undefined ?
-                                       this.undefinedValue :
-                                       value);
+            return -1 < super._indexOf(value === undefined ? this.undefinedValue : value);
         }
 
         /**
@@ -89,9 +87,7 @@ export namespace BitsNullList {
          * @returns {number} The index of the first occurrence, or -1 if not found.
          */
         indexOf(value: number | undefined): number {
-            return super._indexOf(value === undefined ?
-                                  this.undefinedValue :
-                                  value)
+            return super._indexOf(value === undefined ? this.undefinedValue : value);
         }
 
         /**
@@ -100,9 +96,7 @@ export namespace BitsNullList {
          * @returns {number} The index of the last occurrence, or -1 if not found.
          */
         lastIndexOf(value: number | undefined): number {
-            return super._lastIndexOf_(this._size, value === undefined ?
-                                                   this.undefinedValue :
-                                                   value);
+            return super._lastIndexOf_(this._size, value === undefined ? this.undefinedValue : value);
         }
 
         /**
@@ -112,9 +106,7 @@ export namespace BitsNullList {
          * @returns {number} The index of the last occurrence, or -1 if not found.
          */
         lastIndexOf_(from: number, value: number | undefined) {
-            return super._lastIndexOf_(from, value === undefined ?
-                                             this.undefinedValue :
-                                             value)
+            return super._lastIndexOf_(from, value === undefined ? this.undefinedValue : value);
         }
 
         /**
@@ -130,7 +122,9 @@ export namespace BitsNullList {
          * @returns {boolean} True if the slot has a real value, false if it is null/undefined
          *                    or `index` is outside `[0, size)`.
          */
-        hasValue(index: number): boolean { return this.raw(index) !== this.undefinedValue; }
+        hasValue(index: number): boolean {
+            return this.raw(index) !== this.undefinedValue;
+        }
 
         /**
          * Gets the element at the specified index. Returns `undefined` if the element is the null value.
@@ -140,9 +134,7 @@ export namespace BitsNullList {
          */
         get(index: number): number | undefined {
             const value = this.raw(index);
-            return value == this.undefinedValue ?
-                   undefined :
-                   value;
+            return value == this.undefinedValue ? undefined : value;
         }
 
         /**
@@ -151,7 +143,9 @@ export namespace BitsNullList {
          * @param {number} index The index of the element to get the raw value from.
          * @returns {number} The raw value at the specified index, or `undefinedValue` when `index` is outside `[0, size)`.
          */
-        public raw(index: number): number {return index < 0 || this._size <= index ? this.undefinedValue : super.get_(index);}
+        public raw(index: number): number {
+            return index < 0 || this._size <= index ? this.undefinedValue : super.get_(index);
+        }
 
         /** A deep copy: same width, sentinel, default, items; its own storage. */
         clone(): this {
@@ -161,12 +155,13 @@ export namespace BitsNullList {
             return c;
         }
 
-
         /**
          * @inheritdoc
          * @returns {string} The string tag "BitsNullList.R".
          */
-        get [Symbol.toStringTag]() { return "BitsNullList.R" }
+        get [Symbol.toStringTag]() {
+            return "BitsNullList.R";
+        }
 
         /**
          * Generates a hash for the BitsNullList.R object.
@@ -174,7 +169,9 @@ export namespace BitsNullList {
          * @param {(R | undefined)} src The BitsNullList.R object to hash.
          * @returns {number} The computed hash value.
          */
-        static override hash(hash: number, src: R | undefined): number { return BitsList._R.hash(AdHoc.hash_number(hash, undefined), src);}
+        static override hash(hash: number, src: R | undefined): number {
+            return BitsList._R.hash(AdHoc.hash_number(hash, undefined), src);
+        }
 
         /**
          * Checks if two BitsNullList.R objects are equal. They are considered equal if they have the same size,
@@ -191,7 +188,9 @@ export namespace BitsNullList {
          * @inheritdoc
          * @returns {string} A string representation of the bit array, including length and JSON output.
          */
-        override toString() { return `length = ${this.size}\n \n${this.toJSON()}` }
+        override toString() {
+            return `length = ${this.size}\n \n${this.toJSON()}`;
+        }
 
         /**
          * Returns a JSON representation of the bit array. Null values are represented as `null` in the JSON output.
@@ -208,7 +207,9 @@ export namespace BitsNullList {
             return result;
         }
 
-        override get size(): number {return this._size;}
+        override get size(): number {
+            return this._size;
+        }
     }
 
     /**
@@ -226,10 +227,12 @@ export namespace BitsNullList {
 
         /**
          * Creates an empty list with backing capacity reserved up front.
-         * Equivalent to `new RW(bitsPerItem, undefinedValue, -capacity, defaultValue)`.
+         * The room only: `new RW(bitsPerItem, undefinedValue, -capacity)` gives a size too.
          */
         static withCapacity(bitsPerItem: number, undefinedValue: number, capacity: number, defaultValue: number = undefinedValue): RW {
-            return new RW(bitsPerItem, undefinedValue, -capacity, defaultValue);
+            const r = new RW(bitsPerItem, undefinedValue, -capacity, defaultValue);
+            r._size = 0; // the room only
+            return r;
         }
 
         /**
@@ -241,7 +244,9 @@ export namespace BitsNullList {
         }
 
         // Custom string tag for this class.
-        override get [Symbol.toStringTag]() { return "BitsNullList.RW" }
+        override get [Symbol.toStringTag]() {
+            return "BitsNullList.RW";
+        }
 
         /**
          * Creates a new RW seeded with the supplied raw values, one item per byte.
@@ -266,9 +271,7 @@ export namespace BitsNullList {
          * @param value {number | undefined} The value to add.
          */
         add(value: number | undefined) {
-            BitsList.R.add(this, value === undefined ?
-                                 this.undefinedValue :
-                                 value);
+            BitsList.R.add(this, value === undefined ? this.undefinedValue : value);
         }
 
         /**
@@ -277,9 +280,7 @@ export namespace BitsNullList {
          * @param value {number | undefined} The value to insert.
          */
         add_(index: number, value: number | undefined) {
-            R.add_(this, index, value === undefined ?
-                                this.undefinedValue :
-                                value);
+            R.add_(this, index, value === undefined ? this.undefinedValue : value);
         }
 
         /**
@@ -287,21 +288,23 @@ export namespace BitsNullList {
          * @param item {number} The index of the element to remove.
          */
 
-        removeAt(item: number) {R.removeAt(this, item);}
+        removeAt(item: number) {
+            R.removeAt(this, item);
+        }
 
         /**
          * Removes the last element from the list.
          */
-        remove() {R.removeAt(this, this._size - 1);}
+        remove() {
+            R.removeAt(this, this._size - 1);
+        }
 
         /**
          * Removes the specified value from the list.
          * @param value {number | undefined} The value to remove.
          */
         remove_(value: number | undefined) {
-            R.remove(this, value === undefined ?
-                           this.undefinedValue :
-                           value);
+            R.remove(this, value === undefined ? this.undefinedValue : value);
         }
 
         /**
@@ -309,16 +312,16 @@ export namespace BitsNullList {
          * @returns The number of items removed.
          */
         removeAll(value: number | undefined): number {
-            return R.remove(this, value === undefined ?
-                                  this.undefinedValue :
-                                  value);
+            return R.remove(this, value === undefined ? this.undefinedValue : value);
         }
 
         /**
          * Gets the last element in the list.
          * @returns {number | undefined} The last element or undefined.
          */
-        override get last(): number | undefined {return this.get(this._size - 1);} // undefined when empty or null.
+        override get last(): number | undefined {
+            return this.get(this._size - 1);
+        } // undefined when empty or null.
 
         /**
          * Sets the last element in the list.
@@ -326,9 +329,7 @@ export namespace BitsNullList {
          * @throws RangeError if the list is empty.
          */
         override set last(value: number | undefined) {
-            R.set(this, this._size - 1, value === undefined ?
-                                        this.undefinedValue :
-                                        value);
+            R.set(this, this._size - 1, value === undefined ? this.undefinedValue : value);
         }
 
         /**
@@ -336,10 +337,8 @@ export namespace BitsNullList {
          * @param index {number} The index to set the value at.
          * @param value {number | undefined} The value to set.
          */
-        set1( index: number, value: number | undefined) {
-            R.set(this, index, value === undefined ?
-                               this.undefinedValue :
-                               value);
+        set1(index: number, value: number | undefined) {
+            R.set(this, index, value === undefined ? this.undefinedValue : value);
         }
 
         /**
@@ -347,7 +346,9 @@ export namespace BitsNullList {
          * @param index {number} The index to set the value at.
          * @param value {number} The value to set.
          */
-        public raw_(index: number, value: number): void { R.set(this, index, value); }
+        public raw_(index: number, value: number): void {
+            R.set(this, index, value);
+        }
 
         /**
          * The storage bytes for items `[item, item + items)` - both ends on byte boundaries - the list grown to hold them,
@@ -366,8 +367,9 @@ export namespace BitsNullList {
          * @param src {ArrayLike<number | undefined>} The values to set.
          * @returns {RW} The updated RW instance.
          */
-        set(index: number, ...src: (number | undefined)[]): RW { return this.set_(index, src);}
-
+        set(index: number, ...src: (number | undefined)[]): RW {
+            return this.set_(index, src);
+        }
 
         /**
          * Sets values starting from the specified index.
@@ -382,12 +384,7 @@ export namespace BitsNullList {
             if (index < 0) throw new RangeError("Index is out of range");
             if (len <= 0) return this;
             R.begin(this, index, len); // storage, the default-filled gap before `index`, the size: once
-            for (let i = 0; i < len; i++) {
-                const value = src[src_index + i];
-                R.put1(this, index + i, value === undefined ?
-                                        this.undefinedValue :
-                                        value);
-            }
+            R.put(this, index, src, src_index, len, this.undefinedValue); // packed a word at a time, `undefined` as undefinedValue
             return this;
         }
 
@@ -403,30 +400,40 @@ export namespace BitsNullList {
         /**
          * Clears all elements from the list.
          */
-        override clear() {super.clear();}
+        override clear() {
+            super.clear();
+        }
 
         /**
          * Gets the length of the list in terms of number of items.
          * @returns {number} The length of the list.
          */
-        override get length(): number {return this.values.length * BitsList.BITS / this.bits | 0;}
+        override get length(): number {
+            return ((this.values.length * BitsList.BITS) / this.bits) | 0;
+        }
 
         /**
          * Sets the length of the list.
          * @param items {number} The new length of the list.
          */
-        override set length(items: number) { super.set_length(items); }
+        override set length(items: number) {
+            super.set_length(items);
+        }
 
         /**
          * Adjusts the length of the list to fit the actual size.
          */
-        fit() { this.length = this._size; } // Positive: trim storage, keep items (a negative value would clear the list).
+        fit() {
+            this.length = this._size;
+        } // Positive: trim storage, keep items (a negative value would clear the list).
 
         /**
          * @inheritdoc
          * @returns {number} The current size of the bit list.
          */
-        override get size(): number {return this._size;}
+        override get size(): number {
+            return this._size;
+        }
 
         /**
          * @inheritdoc

@@ -24,7 +24,7 @@
 "use strict";
 import Base_ from "../gen/Base_";
 import type Network from "./Network"; // the types of a chain and its codec ( External.secure, Tunnel.EndPoint.secure ); nothing of it is loaded
-import type { Chain } from "./Crypto"; // the keys of an Envelope: nothing of it is loaded
+import type {Chain} from "./Crypto"; // the keys of an Envelope: nothing of it is loaded
 
 // Local contracts keep the protocol runtime compilable with ES types alone.
 // Native implementations are used directly, with no wrapping of decoding hot paths.
@@ -1049,10 +1049,18 @@ export namespace org.unirail.AdHoc {
             /**
              * For the generated code: the Noise of the socket of this connection, as [Noise] of the description of its protocol declares
              * it ( `Chain.noiseKeys` of Crypto.ts ) - every time the protocol layer is seated on it ( the generated `External( ext )` ),
-             * before the handshake. Not called - the socket stays as it is; `undefined` - the connection is refused: there are no keys
-             * for it. Absent - a connection with no socket of its own to encrypt: a tunnel has `EndPoint.secure( chain, left )`.
+             * before the handshake. Not called, or a chain with no pattern - the socket stays as it is, in the clear; `undefined` - the
+             * connection is refused: there are no keys for it. Absent - a connection with no socket of its own to encrypt: a tunnel has
+             * `EndPoint.secure( chain, left )`.
              */
             secure?(chain: Network.Chain | undefined): void;
+
+            /**
+             * Address and port of this side of the socket - the port a socket came in on tells the entries of one host apart ( the
+             * region "The keys of Noise" decides by it ); `undefined` - no socket of its own, none yet, or the platform does not tell
+             * ( a browser ). Absent - none.
+             */
+            local?(): {address: string; port: number} | undefined;
 
             /**
              * Sets the identity of this connection to `id` and tells the {@link Internal} to {@link Internal.resume}.
@@ -1497,8 +1505,8 @@ export namespace org.unirail.AdHoc {
                         const isRemote = Event.Mask.isRemote(event);
                         eventDescription = isRemote ? (isWebSocket ? "WebSocket connection established from " : "Received connection from ") : "Connected to ";
                     } else if (Event.Action.isClose(event)) {
-                        //A timeout that ran out is a close too, so it is asked about HERE: no branch below
-                        //will get it any more.
+                        //Срок, который вышел, - это тоже закрытие, поэтому спрашиваем о нём ЗДЕСЬ: отдельной
+                        //ветки ниже ему больше не достанется.
                         if (Event.Action.isTimeout(event)) eventDescription = Event.Mask.isOnTransmit(event) ? "Timeout while transmitting to " : "Timeout while receiving from ";
                         else {
                             const isGraceful = Event.Mask.isGraceful(event);
@@ -1831,7 +1839,13 @@ export namespace org.unirail.AdHoc {
             private readonly tokens: number[];
 
             /** Identities `[first, first + count)`; `ext` - the transport of a holder, `undefined` - none now; `mine` - the holders whose sessions these are, absent - all. */
-            constructor(private readonly first: number, count: number, private readonly ext: (h: H) => External | undefined, private readonly mine: (h: H) => boolean = () => true, holders?: (H | undefined)[]) {
+            constructor(
+                private readonly first: number,
+                count: number,
+                private readonly ext: (h: H) => External | undefined,
+                private readonly mine: (h: H) => boolean = () => true,
+                holders?: (H | undefined)[],
+            ) {
                 this.holders = holders ?? new Array<H | undefined>(count).fill(undefined);
                 this.tokens = new Array<number>(count).fill(0);
             }
@@ -1842,10 +1856,14 @@ export namespace org.unirail.AdHoc {
             }
 
             /** Whether `id` is in the range. */
-            has(id: number): boolean { return this.first <= id && id - this.first < this.tokens.length; }
+            has(id: number): boolean {
+                return this.first <= id && id - this.first < this.tokens.length;
+            }
 
             /** Who holds the place of `id`; `undefined` - nobody, or `id` is out of the range. */
-            held(id: number): H | undefined { return this.has(id) ? this.holders[id - this.first] : undefined; }
+            held(id: number): H | undefined {
+                return this.has(id) ? this.holders[id - this.first] : undefined;
+            }
 
             /** Takes the place of `id` for `h`; false - it is held, or `id` is out of the range. */
             claim(id: number, h: H): boolean {
@@ -1958,10 +1976,14 @@ export namespace org.unirail.AdHoc {
             }
 
             /** The session on `e` is of `id` from here on: {@link External.identify}. Its token. */
-            identify(id: number, e: External): number { return (this.tokens[id - this.first] = e.identify?.(id) ?? 0); }
+            identify(id: number, e: External): number {
+                return (this.tokens[id - this.first] = e.identify?.(id) ?? 0);
+            }
 
             /** The token of the session of `id`; `0` - none yet. */
-            token(id: number): number { return this.has(id) ? this.tokens[id - this.first] : 0; }
+            token(id: number): number {
+                return this.has(id) ? this.tokens[id - this.first] : 0;
+            }
 
             /**
              * The session of `id` waits parked: it moves onto `e` in the state it was in, what either side was sending going on from
@@ -2532,7 +2554,8 @@ export namespace org.unirail.AdHoc {
                 this.journal?.attach(this, b, restoring, trusted);
                 if (restoring) {
                     const on_disk = this.get32(Control.H_D_GVALID) !== 0;
-                    if (rebooted && on_disk) this.receiver.position_(this.get64(Control.H_D_GUARDED)); // a reboot, and the position was synced ( resumable_sync_ms ): as the disk has it
+                    if (rebooted && on_disk)
+                        this.receiver.position_(this.get64(Control.H_D_GUARDED)); // a reboot, and the position was synced ( resumable_sync_ms ): as the disk has it
                     else if (this.get32(Control.H_POSITIONED) !== 0) this.receiver.position_(this.get64(Control.H_GUARDED)); // the header has the position as the receiver last had it: the generated save() appended an older one
                     if (on_disk) this.rx_synced = this.get64(Control.H_D_GUARDED); // what Confirm_ may name: the disk, not what the file had
                 } else {
@@ -2716,11 +2739,7 @@ export namespace org.unirail.AdHoc {
                 const d = new Date(),
                     z = -d.getTimezoneOffset(),
                     p = (x: number) => (x < 10 ? "0" : "") + x;
-                const line =
-                    d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) + "T" + p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds()) + (z < 0 ? "-" : "+") + p(Math.floor(Math.abs(z) / 60)) + ":" + p(Math.abs(z) % 60) +
-                    " the process that held this session ended without a stop" + (trusted ? "" : ", the system rebooted - possibly") + "." +
-                    (n === 0 ? "" : ` Guaranteed packs queued, not journalled, lost: ${n}, ids ${ids}.`) +
-                    (open === 0 ? "" : ` A guaranteed pack begun, lost: id ${open - 1}.`) + "\n";
+                const line = d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) + "T" + p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds()) + (z < 0 ? "-" : "+") + p(Math.floor(Math.abs(z) / 60)) + ":" + p(Math.abs(z) % 60) + " the process that held this session ended without a stop" + (trusted ? "" : ", the system rebooted - possibly") + "." + (n === 0 ? "" : ` Guaranteed packs queued, not journalled, lost: ${n}, ids ${ids}.`) + (open === 0 ? "" : ` A guaranteed pack begun, lost: id ${open - 1}.`) + "\n";
                 try {
                     Transmitter.Resumable.fs.appendFileSync(Transmitter.Resumable.dir + "/lost." + this.name + ".txt", line);
                 } catch (e) {
@@ -2873,12 +2892,7 @@ export namespace org.unirail.AdHoc {
              */
             next(): Transmitter.BytesSrc {
                 const s = this.transmitter.to_say;
-                const k = (this.saying =
-                    (s & (1 << Control.CONTINUE)) !== 0 ? Control.CONTINUE
-                    : (s & (1 << Control.FRESH)) !== 0 ? Control.FRESH
-                    : (s & (1 << Control.LOST)) !== 0 ? Control.LOST
-                    : (s & (1 << Control.OK)) !== 0 ? Control.OK
-                    : Control.CONFIRM);
+                const k = (this.saying = (s & (1 << Control.CONTINUE)) !== 0 ? Control.CONTINUE : (s & (1 << Control.FRESH)) !== 0 ? Control.FRESH : (s & (1 << Control.LOST)) !== 0 ? Control.LOST : (s & (1 << Control.OK)) !== 0 ? Control.OK : Control.CONFIRM);
                 this.transmitter.to_say = s & ~(1 << k);
                 switch (k) {
                     case Control.CONFIRM:
@@ -2899,7 +2913,8 @@ export namespace org.unirail.AdHoc {
 
             /** The pack {@link next} gave is out: called by its generated serializer. */
             said(): void {
-                if (this.saying === Control.LOST) this.journal!.resume(this.lost); // the peer is told: the stream goes on from there
+                if (this.saying === Control.LOST)
+                    this.journal!.resume(this.lost); // the peer is told: the stream goes on from there
                 else if (this.saying === Control.OK) this.journal!.resume(this.ok); // the bytes of the journal follow the answer
             }
 
@@ -2939,7 +2954,8 @@ export namespace org.unirail.AdHoc {
                 const r = this.receiver;
                 const position = r.positioned ? this.resolve(low, r.received) : low;
                 this.agreed = position;
-                if (r.greeting) r.Lost(position); // the guaranteed pack in progress is dropped
+                if (r.greeting)
+                    r.Lost(position); // the guaranteed pack in progress is dropped
                 else r.position_(position);
                 this.internal.resume?.(undefined); // told when the position is the new one already
             }
@@ -3071,8 +3087,7 @@ export namespace org.unirail.AdHoc {
              */
             Lost(position: number): void {
                 this.greeted();
-                if (0 <= this.guarded_from && this.slot?.dst !== undefined)
-                    this.ext_connection?.fault?.(Error(`The guaranteed pack ${this.guarded_id} was cut by the loss of a connection and is dropped: the journal of the peer does not hold its bytes, its stream goes on from ${position}`));
+                if (0 <= this.guarded_from && this.slot?.dst !== undefined) this.ext_connection?.fault?.(Error(`The guaranteed pack ${this.guarded_id} was cut by the loss of a connection and is dropped: the journal of the peer does not hold its bytes, its stream goes on from ${position}`));
                 this.Abandon();
                 this.position_(position);
             }
@@ -4060,17 +4075,23 @@ export namespace org.unirail.AdHoc {
             }
 
             /**
-             * {@link get_bits_list} of one-bit items into a `BitList`: appended 32 at a time - the list is filled in order,
-             * `item` is its size.
+             * {@link get_bits_list} of one-bit items into a `BitList`, 32 at a time, written from `item`: the list is filled in
+             * order, the bits from `item` on are still the zeros of its preset size.
              */
-            public get_bits_bools(dst: {append32(src: number, n: number): unknown}, _item: number, items: number): number {
+            public get_bits_bools(dst: {append32At(at: number, src: number, n: number): unknown; append32sAt?(at: number, src: DataView, pos: number, words: number): unknown}, item: number, items: number): number {
                 if (this.bit !== 8) return 0;
                 const buf = this.buffer!,
                     max = this.byte_max;
                 let pos = this.byte,
                     got = 0;
-                for (; got + 32 <= items && pos + 4 <= max; got += 32, pos += 4) dst.append32(buf.getUint32(pos, true), 32);
-                for (; got + 8 <= items && pos < max; got += 8, pos++) dst.append32(buf.getUint8(pos), 8);
+                const words = Math.min(items >>> 5, (max - pos) >> 2); // the whole words the loop below takes: in one call
+                if (0 < words && dst.append32sAt !== undefined) {
+                    dst.append32sAt(item, buf, pos, words);
+                    got = words << 5;
+                    pos += words << 2;
+                }
+                for (; got + 32 <= items && pos + 4 <= max; got += 32, pos += 4) dst.append32At(item + got, buf.getUint32(pos, true), 32);
+                for (; got + 8 <= items && pos < max; got += 8, pos++) dst.append32At(item + got, buf.getUint8(pos), 8);
                 this.byte = pos;
                 return got;
             }
@@ -4403,7 +4424,7 @@ export namespace org.unirail.AdHoc {
                     if (0x7f < len) len = at < m && buf.getUint8(at) < 0x80 ? (len & 0x7f) | (buf.getUint8(at++) << 7) : -1; // -1: longer, or cut by the window
                     if (0 <= len && len <= max_chars) {
                         if (len <= m - at) {
-                            const s = len < 16 ? Receiver.ascii_short_(buf, at, len) : Receiver.ascii_bytes_(buf, at, len) ? Receiver.ascii_.decode(new Uint8Array(buf.buffer, buf.byteOffset + at, len)) : undefined;
+                            const s = len < 40 ? Receiver.ascii_short_(buf, at, len) : Receiver.ascii_bytes_(buf, at, len) ? Receiver.ascii_.decode(new Uint8Array(buf.buffer, buf.byteOffset + at, len)) : undefined;
                             if (s !== undefined) {
                                 this.str = s;
                                 this.byte = at + len;
@@ -4511,13 +4532,25 @@ export namespace org.unirail.AdHoc {
              * @returns whether the `n` bytes of `buf` at `pos` are all below 0x80, 4 at a time.
              */
             /**
-             * Arrays of 0..15 character codes, one per length, made once and reused: `String.fromCharCode.apply` takes them
-             * as they are. A short string is built from them - the decoder's call costs more than such a string.
+             * Arrays of 0..79 character codes, one per length, made once and reused: `String.fromCharCode.apply` takes them
+             * as they are. A short string is built from them - the decoder's call costs more than such a string: an ASCII one
+             * below 40 characters ( Node 25: 16 chars 72 -> 33 ns, 31 chars 77 -> 64 ns; from 40 on the UTF-8 decoder is as
+             * fast ), one of other characters below 80 ( 40 chars 119 -> 75 ns against the UTF-16 decoder ).
              */
-            static readonly short_: number[][] = Array.from({length: 16}, (_, n) => Array.from({length: n}, () => 0));
+            static readonly short_: number[][] = Array.from({length: 80}, (_, n) => Array.from({length: n}, () => 0));
 
-            /** The string of the `n` (< 16) bytes of `buf` at `pos`, `undefined` - one of them is above 0x7F. */
+            /** The string of the `n` (< 40) bytes of `buf` at `pos`, `undefined` - one of them is above 0x7F. */
             static ascii_short_(buf: DataView, pos: number, n: number): string | undefined {
+                if (n < 3) {
+                    // none, one or two characters: the engine's own one-character strings, no array ( 2-3x faster )
+                    if (n === 0) return "";
+                    const c0 = buf.getUint8(pos);
+                    if (0x7f < c0) return undefined;
+                    if (n === 1) return String.fromCharCode(c0);
+                    const c1 = buf.getUint8(pos + 1);
+                    if (0x7f < c1) return undefined;
+                    return String.fromCharCode(c0, c1);
+                }
                 const codes = Receiver.short_[n]!;
                 for (let i = 0; i < n; i++) {
                     const c = buf.getUint8(pos + i);
@@ -4543,6 +4576,13 @@ export namespace org.unirail.AdHoc {
 
             /** The string of the units `c[0, n)`, a lone surrogate kept. */
             #string(c: Uint16Array, n: number): string {
+                if (n < Receiver.short_.length) {
+                    // a short string: its units through a reused array - no decoder call, no subarray; the same string,
+                    // a lone surrogate kept as the decoder's fallback below keeps it
+                    const codes = Receiver.short_[n]!;
+                    for (let i = 0; i < n; i++) codes[i] = c[i]!;
+                    return String.fromCharCode.apply(null, codes);
+                }
                 const units = c.subarray(0, n);
                 try {
                     return this.#decoder.decode(units);
@@ -4652,36 +4692,36 @@ export namespace org.unirail.AdHoc {
                             pos += 2;
                             continue;
                         }
-                        if (u4_ + 2 <= target) {
-                            // whole units of the word, each by its length, no per-byte state: while 3 bytes at least remain in
-                            // the word a unit is whole in it - two at most; one the word's end cuts is read again from the next word
-                            let w = packed;
-                            let used = 0;
-                            while (used <= 1) {
-                                const b0 = w & 0xff;
-                                if (b0 < 0x80) {
-                                    c[u4_++] = b0;
-                                    w >>>= 8;
-                                    used++;
-                                    continue;
-                                }
-                                const b1 = (w >>> 8) & 0xff;
-                                if (b1 < 0x80) {
-                                    c[u4_++] = (b0 & 0x7f) | (b1 << 7);
-                                    w >>>= 16;
-                                    used += 2;
-                                    continue;
-                                }
-                                const b2 = (w >>> 16) & 0xff;
-                                if (3 < b2) break; // past 0xFFFF or longer: the byte path below
-                                c[u4_++] = (b0 & 0x7f) | ((b1 & 0x7f) << 7) | (b2 << 14);
-                                w >>>= 24;
-                                used += 3;
-                            }
-                            if (0 < used) {
-                                pos += used;
+                        // A run of units of any width, each whole by its length, no per-byte state and no word reloaded a
+                        // unit: on and on while 3 bytes at least are in the window ( a unit is whole in them ) - one ASCII
+                        // byte that starts 4 of them gives the run back to the word step above ( mixed text: Cyrillic with
+                        // spaces, CJK with ASCII, emoji pairs went a word or two units at a time ).
+                        const kmax = Math.min(target, c.length);
+                        let p = pos,
+                            k = u4_;
+                        while (p <= limit - 3 && k < kmax) {
+                            const b0 = buf.getUint8(p);
+                            if (b0 < 0x80) {
+                                if (p <= limit - 4 && (buf.getUint32(p, true) & 0x80808080) === 0) break; // an ASCII run: the word step
+                                c[k++] = b0;
+                                p++;
                                 continue;
                             }
+                            const b1 = buf.getUint8(p + 1);
+                            if (b1 < 0x80) {
+                                c[k++] = (b0 & 0x7f) | (b1 << 7);
+                                p += 2;
+                                continue;
+                            }
+                            const b2 = buf.getUint8(p + 2);
+                            if (3 < b2) break; // past 0xFFFF or longer: the byte path below
+                            c[k++] = (b0 & 0x7f) | ((b1 & 0x7f) << 7) | (b2 << 14);
+                            p += 3;
+                        }
+                        if (pos < p) {
+                            u4_ = k;
+                            pos = p;
+                            continue;
                         }
                     }
 
@@ -5205,7 +5245,8 @@ export namespace org.unirail.AdHoc {
              */
             public dim(max: number, bytes: number): number {
                 const dim = this.get4_(bytes);
-                if (max < dim) { // the peer broke the protocol: told, then the connection is torn down - reading on would let it size the array
+                if (max < dim) {
+                    // the peer broke the protocol: told, then the connection is torn down - reading on would let it size the array
                     const e = Error("In dim(max: number, bytes: number): number{}  max < dim : " + max + " < " + dim);
                     AdHoc.Connection.Receiver.error_handler(this, undefined, AdHoc.Connection.Receiver.OnError.OVERFLOW, e);
                     throw e;
@@ -5224,7 +5265,8 @@ export namespace org.unirail.AdHoc {
              */
             public length(max: number, bytes: number): number {
                 const len = this.get4_(bytes);
-                if (max < len) { // the peer broke the protocol: told, then the connection is torn down - the items behind would be read as the fields after
+                if (max < len) {
+                    // the peer broke the protocol: told, then the connection is torn down - the items behind would be read as the fields after
                     const e = Error("In length(max: number, bytes: number): number{} max < len : " + max + " < " + len);
                     AdHoc.Connection.Receiver.error_handler(this, undefined, AdHoc.Connection.Receiver.OnError.OVERFLOW, e);
                     throw e;
@@ -5471,8 +5513,7 @@ export namespace org.unirail.AdHoc {
                                     this._tunnelDone = true;
                                     if (this._rem === Transmitter.Chunked.ABORT) {
                                         this._rem = 0;
-                                        if (this._Adapter.dst !== undefined && !(this._Adapter.dst instanceof Receiver))
-                                            this._Adapter.failed = true; // the stream of a plain tunnel: its sink hears it torn
+                                        if (this._Adapter.dst !== undefined && !(this._Adapter.dst instanceof Receiver)) this._Adapter.failed = true; // the stream of a plain tunnel: its sink hears it torn
                                         src.slot.dst = undefined; // tunnel: not actor traffic → the receive loop skips the dispatch
                                         this.on_tunnel_end(this.tunnel_id, true);
                                         return true;
@@ -7660,6 +7701,26 @@ export namespace org.unirail.AdHoc {
                             buf.setUint8(pos + 2, c0 >>> 14);
                             pos += 3;
                         }
+                        // a run of chars of any width on: each its 1, 2 or 3 bytes at once while 3 bytes of room are there -
+                        // not the tests of the loop above a char ( Cyrillic, CJK, emoji pairs, Latin-1 between ASCII ); two
+                        // ASCII chars in a row give the run back to its word step
+                        while (bytes_left_ < len && pos <= limit - 3) {
+                            const c = src.charCodeAt(bytes_left_);
+                            bytes_left_++;
+                            if (c < 0x80) {
+                                buf.setUint8(pos++, c);
+                                if (bytes_left_ < len && src.charCodeAt(bytes_left_) < 0x80) break;
+                                continue;
+                            }
+                            if (c < 0x4000) {
+                                buf.setUint16(pos, 0x80 | (c & 0x7f) | ((c >>> 7) << 8), true);
+                                pos += 2;
+                            } else {
+                                buf.setUint16(pos, 0x80 | (c & 0x7f) | ((0x80 | ((c >>> 7) & 0x7f)) << 8), true);
+                                buf.setUint8(pos + 2, c >>> 14);
+                                pos += 3;
+                            }
+                        }
                         continue;
                     }
 
@@ -9416,7 +9477,8 @@ export namespace org.unirail.AdHoc {
                     let k = from;
                     while (k < segs.length && segs[k]! < n && segs[k] === segs[from]! + (k - from) * S && fs.statSync(this.seg(segs[k]!)).size === S) k++;
                     for (let i = k; i < segs.length; i++)
-                        if (segs[i]! < n) return false; // a gap in the files, or a file not of this lib
+                        if (segs[i]! < n)
+                            return false; // a gap in the files, or a file not of this lib
                         else this.unlink(this.seg(segs[i]!)); // past the journal
                     const chain = k - from,
                         s0 = chain === 0 ? hb : segs[from]!,
@@ -10255,7 +10317,8 @@ export namespace org.unirail.AdHoc {
                         this._base += this.segment;
                     }
                     if (0 < this.segments.length || upto <= this._base) return;
-                    if (upto === this._next) this.hot_off = this.hot_len = 0; // everything confirmed: the buffer starts over at its head, nothing is ever moved
+                    if (upto === this._next)
+                        this.hot_off = this.hot_len = 0; // everything confirmed: the buffer starts over at its head, nothing is ever moved
                     else this.hot_off += upto - this._base; // given back where it lies: what stays is moved when the tail is full, see flush()
                     this._base = upto;
                 }
@@ -10775,18 +10838,28 @@ export namespace org.unirail.AdHoc {
          * and not pooled back — teardown stays bounded and one-time.
          */
         export namespace Tunnel {
+            // a setter, not `export let`: a namespace that exports a let does not build under Babel, esbuild and oxc ( vite ) - one file at a time, they cannot see who reads it
+
             /**
-             * The address of this host in the tunnels it ends and relays: the identity its peers know it by. 0 - none: the usual route
+             * Sets the address of this host in the tunnels it ends and relays: the identity its peers know it by. 0 - none: the usual route
              * of a tunnel ( {@link Relay.route} ) ends here only what comes on a dialed connection or from a host not identified, and the usual side
              * ( {@link side} ) is off.
              */
-            export let address = 0;
+            export function address(a: number): void {
+                address_ = a;
+            }
+
+            let address_ = 0;
 
             /**
-             * The hosts this one relays tunnels for, by the address their login proved ( {@link External.identify} ):
+             * Sets the hosts this one relays tunnels for, by the address their login proved ( {@link External.identify} ):
              * {@link Sessions} is one. undefined - none: the usual route of a tunnel is off.
              */
-            export let hosts: Hosts | undefined = undefined;
+            export function hosts(h: Hosts | undefined): void {
+                hosts_ = h;
+            }
+
+            let hosts_: Hosts | undefined = undefined;
 
             /** The hosts a relay sends tunnels to, by their address. */
             export interface Hosts {
@@ -10800,7 +10873,7 @@ export namespace org.unirail.AdHoc {
              * own address, and the far end is the host on `carrier`. undefined - no {@link address}: the side goes by who opened the tunnel.
              */
             export function side(tunnel_id: number, carrier: External): boolean | undefined {
-                const a = address;
+                const a = address_;
                 return a === 0 ? undefined : a > (tunnel_id === a ? (carrier.id ?? 0) : tunnel_id);
             }
 
@@ -11020,7 +11093,9 @@ export namespace org.unirail.AdHoc {
                 }
 
                 /** The connection the frame being routed came on: a route of one's own ( region Tunneling ) knows by it who sent the tunnel. */
-                public get inbound(): External { return this.Inbound; }
+                public get inbound(): External {
+                    return this.Inbound;
+                }
 
                 /**
                  * The usual route of a host that relays tunnels for the hosts logged in to it ( {@link Tunnel.hosts} ): what comes on a
@@ -11031,9 +11106,9 @@ export namespace org.unirail.AdHoc {
                 public route(tunnel_id: number): External | undefined {
                     if (this.circuit(tunnel_id)) return this._target;
                     const from = this.Inbound.id ?? 0;
-                    if (this._opening ? tunnel_id === address : this.Inbound.dialing === true || from === 0 || tunnel_id === address) return this.here();
-                    const all = hosts;
-                    if (all === undefined) throw new Error("The usual route of a tunnel needs AdHoc.Connection.Tunnel.hosts and AdHoc.Connection.Tunnel.address: set them, or route the tunnel in region Tunneling");
+                    if (this._opening ? tunnel_id === address_ : this.Inbound.dialing === true || from === 0 || tunnel_id === address_) return this.here();
+                    const all = hosts_;
+                    if (all === undefined) throw new Error("The usual route of a tunnel needs AdHoc.Connection.Tunnel.hosts( ... ) and AdHoc.Connection.Tunnel.address( ... ): set them, or route the tunnel in region Tunneling");
                     const to = all.at(tunnel_id);
                     if (to !== undefined && !this._opening) this.tunnel_id = from; // a tunnel a relay sent here: the end gets a label of this host
                     return to;
@@ -11069,10 +11144,12 @@ export namespace org.unirail.AdHoc {
                         this._up = false;
                         this.tunnel_id = c.upTid;
                         this._target = c.up;
-                    } else if (this._circuits === undefined || (c = this._circuits.get(tunnel_id)) === undefined) return false; // a label the far relay gave the end here, or no label
+                    } else if (this._circuits === undefined || (c = this._circuits.get(tunnel_id)) === undefined)
+                        return false; // a label the far relay gave the end here, or no label
                     else {
                         this._up = true;
-                        if (c.down === undefined) this._target = this.here(); // a circuit that ends here: its end knows it by the label it came with
+                        if (c.down === undefined)
+                            this._target = this.here(); // a circuit that ends here: its end knows it by the label it came with
                         else {
                             this.tunnel_id = c.label;
                             this._target = c.down;
@@ -11084,7 +11161,9 @@ export namespace org.unirail.AdHoc {
                 }
 
                 /** Where a frame of a circuit goes ( {@link circuit} ). */
-                public get target(): External | undefined { return this._target; }
+                public get target(): External | undefined {
+                    return this._target;
+                }
 
                 // --- circuits ---
                 private _circuits: Map<number, Circuit> | undefined; // whose up side is this inbound, by the tunnel id it sends there
@@ -11478,7 +11557,8 @@ export namespace org.unirail.AdHoc {
                 private dropped(src: Receiver, pos: number): boolean {
                     if (this._bounce) {
                         this._bounce = false;
-                        if (this._rxAbort) this._bounced?.delete(this._inTid); // the source answered: the next packet that finds no target is told again
+                        if (this._rxAbort)
+                            this._bounced?.delete(this._inTid); // the source answered: the next packet that finds no target is told again
                         else if (!(this._bounced ??= new Set<number>()).has(this._inTid)) {
                             this._bounced.add(this._inTid);
                             this._outboundSrc.back(this.Inbound, new Relay.Farewell(this._outId, this._idBytes, this._inTid, this._tidBytes));
@@ -11961,7 +12041,7 @@ export namespace org.unirail.AdHoc {
              *  on a new tunnel till its deadline, then its close event comes. */
             export class Parked {
                 private static next = 0;
-                private static readonly waiting = new Map<number, { end: EndPoint; reaper: ReturnType<typeof setTimeout> }>();
+                private static readonly waiting = new Map<number, {end: EndPoint; reaper: ReturnType<typeof setTimeout>}>();
 
                 static slot(): number {
                     Parked.next = Parked.next === 0x1f_ffff ? 1 : Parked.next + 1; // the slot and the identity fit the 53 bits of a number
@@ -11975,8 +12055,8 @@ export namespace org.unirail.AdHoc {
                         Parked.waiting.delete(end.slot);
                         end.reap();
                     }, ms);
-                    (reaper as { unref?: () => void }).unref?.(); // a parked session keeps no process alive
-                    Parked.waiting.set(end.slot, { end, reaper });
+                    (reaper as {unref?: () => void}).unref?.(); // a parked session keeps no process alive
+                    Parked.waiting.set(end.slot, {end, reaper});
                 }
 
                 /** The parked session on `slot` under the identity `id`, taken off the list; undefined - none. */
@@ -12100,7 +12180,7 @@ export namespace org.unirail.AdHoc {
                     if (this.timerD !== undefined) clearTimeout(this.timerD);
                     this.dueD = due;
                     this.timerD = setTimeout(() => this.timedOutDeadline(), Math.max(0, Math.min(ms, 0x7fffffff)));
-                    (this.timerD as { unref?: () => void }).unref?.(); // a deadline keeps no process alive
+                    (this.timerD as {unref?: () => void}).unref?.(); // a deadline keeps no process alive
                     return due;
                 }
 
@@ -12111,7 +12191,10 @@ export namespace org.unirail.AdHoc {
                     this.dueD = 0;
                     if (this.closing) return;
                     const now = Date.now();
-                    if (now < due) { this.Deadline(due - now); return; } // beyond the platform timer range: the rest of it
+                    if (now < due) {
+                        this.Deadline(due - now);
+                        return;
+                    } // beyond the platform timer range: the rest of it
                     const next = this.internal?.OnDeadline?.(now) ?? 0;
                     if (0 < next && !this.closing) this.Deadline(next - Date.now());
                 }
@@ -12239,7 +12322,10 @@ export namespace org.unirail.AdHoc {
                         answer = !this.closing;
                     }
                     this.closing = true; // no burst after this one: isOpen is false
-                    if (this.timerD !== undefined) { clearTimeout(this.timerD); this.timerD = undefined; } // no deadline of an ended tunnel
+                    if (this.timerD !== undefined) {
+                        clearTimeout(this.timerD);
+                        this.timerD = undefined;
+                    } // no deadline of an ended tunnel
                     const first = !this.ended; // once: the far end's end and the last burst of this one may both come
                     this.ended = true;
                     const internal = this.internal;
@@ -12287,7 +12373,7 @@ export namespace org.unirail.AdHoc {
 
                 public get Dst(): AdHoc.BytesDst | undefined {
                     this.heard = true; // a frame of the far end: it knows this session
-                    return 0 < this.drain ? EndPoint.drop : this.noise ?? this.internal?.BytesDst;
+                    return 0 < this.drain ? EndPoint.drop : (this.noise ?? this.internal?.BytesDst);
                 }
 
                 /** A burst of this session went out; a frame of the far end came on it. Neither - the far end does not know the
@@ -12927,6 +13013,7 @@ export namespace org.unirail.AdHoc {
      */
     export function hash_array<V>(hash: number, src: ArrayLike<V> | undefined, hashV: (hash: number, v: V) => number, size?: number): number {
         if (!src) return 757577 ^ hash;
+        if ((hashV as unknown) === hash_number) return hash_array_numbers(hash, src as unknown as ArrayLike<number | undefined>, size ?? src.length);
         switch ((size ??= src.length)) {
             case 0:
                 return AdHoc.finalizeHash(hash, 0);
@@ -12950,6 +13037,36 @@ export namespace org.unirail.AdHoc {
         }
 
         return AdHoc.avalanche(AdHoc.mix(AdHoc.mix(hash, rangeDiff), prev));
+    }
+
+    /**
+     * `hash_array(hash, src, hash_number, size)` with direct calls the JIT inlines - not a call through `hashV` an item, a
+     * megamorphic one once the program hashes several kinds of arrays: the same hash, bit for bit.
+     */
+    function hash_array_numbers(hash: number, src: ArrayLike<number | undefined>, size: number): number {
+        switch (size) {
+            case 0:
+                return finalizeHash(hash, 0);
+            case 1:
+                return finalizeHash(mix(hash, hash_number(hash, src[0])), 1);
+        }
+
+        const initial = hash_number(hash, src[0]);
+        let prev = hash_number(hash, src[1]);
+        const rangeDiff = prev - initial;
+        hash = mix(hash, initial);
+
+        for (let i = 2; i < size; ++i) {
+            hash = mix(hash, prev);
+            const k = hash_number(hash, src[i]);
+            if (rangeDiff !== k - prev) {
+                for (hash = mix(hash, k), ++i; i < size; ++i) hash = mix(hash, hash_number(hash, src[i]));
+                return finalizeHash(hash, size);
+            }
+            prev = k;
+        }
+
+        return avalanche(mix(mix(hash, rangeDiff), prev));
     }
 
     /**
@@ -13723,7 +13840,9 @@ export namespace org.unirail.AdHoc {
          * @param maxDateMillis   <b>Physical Limit:</b> The absolute upper bound of the storage container, inclusive of Gap and Bit-Expansion.
          * @param precisionMillis <b>Tick Duration:</b> The exact quantization step. Generator guarantees this perfectly divides the range.
          * @param absolute        <b>Mode:</b> true - a `DateTimeDef`, linear; false - a `TimeSpanDef`, a ring relative to now.
-         * @param zoneHours       Fixed time-zone offset hours.
+         * @param zoneHours       Fixed time-zone offset hours. Without it - the offset of the local zone at the moment of
+         *                        creation, fixed: daylight saving time is not followed. For the exact local time pass
+         *                        `zoneHours` / `zoneMinutes` explicitly.
          * @param zoneMinutes     Fixed time-zone offset minutes.
          * @param unit            Units of the type in a millisecond: 1 - milliseconds, 1000 - microseconds. A microsecond type
          *                        passes `min` and `max` as whole milliseconds, their microseconds in `minSub` and `maxSub`, and
@@ -14290,23 +14409,23 @@ export namespace org.unirail.AdHoc {
 
         // the second argument is read after the first decoded `dt`: the microseconds of that moment
         public plusDays(dt: DateTime, days: number): DateTime {
-            return this.fromTotalMillis(this.toUnixMillis(dt) + (days | 0) * _DateTime.MILLIS_PER_DAY, this.#outSub);
+            return this.fromTotalMillis(this.toUnixMillis(dt) + Math.trunc(days) * _DateTime.MILLIS_PER_DAY, this.#outSub);
         }
 
         public plusHours(dt: DateTime, hours: number): DateTime {
-            return this.fromTotalMillis(this.toUnixMillis(dt) + (hours | 0) * _DateTime.MILLIS_PER_HOUR, this.#outSub);
+            return this.fromTotalMillis(this.toUnixMillis(dt) + Math.trunc(hours) * _DateTime.MILLIS_PER_HOUR, this.#outSub);
         }
 
         public plusMinutes(dt: DateTime, minutes: number): DateTime {
-            return this.fromTotalMillis(this.toUnixMillis(dt) + (minutes | 0) * _DateTime.MILLIS_PER_MINUTE, this.#outSub);
+            return this.fromTotalMillis(this.toUnixMillis(dt) + Math.trunc(minutes) * _DateTime.MILLIS_PER_MINUTE, this.#outSub);
         }
 
         public plusSeconds(dt: DateTime, seconds: number): DateTime {
-            return this.fromTotalMillis(this.toUnixMillis(dt) + (seconds | 0) * _DateTime.MILLIS_PER_SECOND, this.#outSub);
+            return this.fromTotalMillis(this.toUnixMillis(dt) + Math.trunc(seconds) * _DateTime.MILLIS_PER_SECOND, this.#outSub);
         }
 
         public plusMilliseconds(dt: DateTime, ms: number): DateTime {
-            return this.fromTotalMillis(this.toUnixMillis(dt) + (ms | 0), this.#outSub);
+            return this.fromTotalMillis(this.toUnixMillis(dt) + Math.trunc(ms), this.#outSub);
         }
 
         // Negative helpers
@@ -14562,7 +14681,6 @@ export namespace org.unirail.AdHoc {
         export const zeroPad2 = (n: number): string => (n < 10 ? `0${n}` : String(n));
         export const zeroPad3 = (n: number): string => (n < 100 ? (n < 10 ? `00${n}` : `0${n}`) : String(n));
     }
-
 //#region 128-bit integers, UUID and fixed-point decimals: the values stay numbers, the operations work in place
 
     const P16 = 0x1_0000,
@@ -14633,7 +14751,7 @@ export namespace org.unirail.AdHoc {
             const cur = rem * P32 + w[k];
             let q = Math.floor(cur / d);
             rem = cur - q * d;
-            if (rem < 0) (q--, (rem += d));
+            if (rem < 0) q--, (rem += d);
             w[k] = q;
         }
         return rem;
@@ -14779,7 +14897,9 @@ export namespace org.unirail.AdHoc {
 
         /** Whether the signed value is a safe integer. */
         fitsNumber(): boolean {
-            const a = this.a, b = this.b, c = this.c | 0;
+            const a = this.a,
+                b = this.b,
+                c = this.c | 0;
             return c === 0 ? b < 32 : c === -1 && (P48 - 32 < b || (b === P48 - 32 && 0 < a));
         }
 
@@ -15024,7 +15144,9 @@ export namespace org.unirail.AdHoc {
         parseUnsigned(s: string | Uint8Array, from: number, to: number): Int128 {
             if (from < to && charAt(s, from) === 43) from++;
             if (to <= from) throw new SyntaxError("No digits");
-            let a = 0, b = 0, c = 0;
+            let a = 0,
+                b = 0,
+                c = 0;
             for (let k = from; k < to; k++) {
                 const d = charAt(s, k) - 48;
                 if (d < 0 || 9 < d) throw new SyntaxError(`Not a digit at ${k}`);
@@ -15053,7 +15175,9 @@ export namespace org.unirail.AdHoc {
         /** Sets up to 32 hexadecimal digits `s[from, to)`, either case, as bits. */
         parseHex(s: string | Uint8Array, from: number, to: number): Int128 {
             if (to <= from || 32 < to - from) throw new SyntaxError("Not 1..32 hexadecimal digits");
-            let a = 0, b = 0, c = 0;
+            let a = 0,
+                b = 0,
+                c = 0;
             for (let k = from; k < to; k++) {
                 const d = hexDigit(charAt(s, k));
                 if (d < 0) throw new SyntaxError(`Not a hexadecimal digit at ${k}`);
@@ -15210,8 +15334,7 @@ export namespace org.unirail.AdHoc {
          */
         parse(s: string | Uint8Array, from: number, to: number): Uuid {
             if (to - from === 32) return this.set(hexValue(s, from + 20, 12), hexValue(s, from + 8, 12), hexValue(s, from, 8));
-            if (to - from !== 36 || charAt(s, from + 8) !== 45 || charAt(s, from + 13) !== 45 || charAt(s, from + 18) !== 45 || charAt(s, from + 23) !== 45)
-                throw new SyntaxError("Not a UUID");
+            if (to - from !== 36 || charAt(s, from + 8) !== 45 || charAt(s, from + 13) !== 45 || charAt(s, from + 18) !== 45 || charAt(s, from + 23) !== 45) throw new SyntaxError("Not a UUID");
             return this.set(hexValue(s, from + 24, 12), hexValue(s, from + 9, 4) * P32 + hexValue(s, from + 14, 4) * P16 + hexValue(s, from + 19, 4), hexValue(s, from, 8));
         }
 
@@ -15460,7 +15583,7 @@ export namespace org.unirail.AdHoc {
                 p = POW10[scale];
             let ip = Math.floor(m / p),
                 fp = m - ip * p;
-            if (fp < 0) (ip--, (fp += p));
+            if (fp < 0) ip--, (fp += p);
             let digits = 1;
             for (let t = ip; 10 <= t; t = Math.floor(t / 10)) digits++;
             for (let k = off + n + digits - 1; off + n <= k; k--, ip = Math.floor(ip / 10)) dst[k] = 48 + (ip % 10);
@@ -15627,28 +15750,18 @@ export namespace org.unirail.AdHoc {
 
         /** Units `a` times the decimal `b` × 10^-scale, kept at the scale of `a`, rounded by `mode`, checked against `max`. */
         static multiplyUnits(a: number, b: number | bigint, scale: number, mode: RoundingMode, max: number): number {
-            return Decimal.checkUnits(
-                typeof b === "number" && scale <= Decimal.MAX_SCALE ? quotient(a, b, POW10[scale], mode) : Number(Decimal.quotientBigInt(BigInt(a), BigInt(b), POW10N[scale], mode)),
-                max
-            );
+            return Decimal.checkUnits(typeof b === "number" && scale <= Decimal.MAX_SCALE ? quotient(a, b, POW10[scale], mode) : Number(Decimal.quotientBigInt(BigInt(a), BigInt(b), POW10N[scale], mode)), max);
         }
 
         /** Units `a` divided by the decimal `b` × 10^-scale, kept at the scale of `a`, rounded by `mode`, checked against `max`. */
         static divideUnits(a: number, b: number | bigint, scale: number, mode: RoundingMode, max: number): number {
-            return Decimal.checkUnits(
-                typeof b === "number" && scale <= Decimal.MAX_SCALE ? quotient(a, POW10[scale], b, mode) : Number(Decimal.quotientBigInt(BigInt(a), POW10N[scale], BigInt(b), mode)),
-                max
-            );
+            return Decimal.checkUnits(typeof b === "number" && scale <= Decimal.MAX_SCALE ? quotient(a, POW10[scale], b, mode) : Number(Decimal.quotientBigInt(BigInt(a), POW10N[scale], BigInt(b), mode)), max);
         }
 
         /** Units at scale `from` as units at scale `to`, rounded by `mode`; a result outside the safe integers throws `RangeError`. */
         static rescaleUnits(u: number, from: number, to: number, mode: RoundingMode): number {
             const d = to - from;
-            return d < -Decimal.MAX_SCALE || Decimal.MAX_SCALE < d
-                ? safe(Number(Decimal.rescaleBigInt(BigInt(u), from, to, mode)))
-                : 0 <= d
-                  ? quotient(u, POW10[d], 1, mode)
-                  : quotient(u, 1, POW10[-d], mode);
+            return d < -Decimal.MAX_SCALE || Decimal.MAX_SCALE < d ? safe(Number(Decimal.rescaleBigInt(BigInt(u), from, to, mode))) : 0 <= d ? quotient(u, POW10[d], 1, mode) : quotient(u, 1, POW10[-d], mode);
         }
 
         /** For display: the nearest number. */
@@ -15736,7 +15849,7 @@ export namespace org.unirail.AdHoc {
          * exactly. A quotient past 127 bits throws `RangeError` and leaves `dst` as it was. Makes nothing.
          */
         static quotient128(x: Int128, y: Int128, d: Int128, mode: RoundingMode, dst: Int128 = x): Int128 {
-            const neg = (x.c | 0) < 0 !== (y.c | 0) < 0 !== (d.c | 0) < 0;
+            const neg = ((x.c | 0) < 0 !== (y.c | 0) < 0) !== (d.c | 0) < 0;
             limbs16(x, LA);
             limbs16(y, LB);
             limbs16(d, LD);
@@ -15791,8 +15904,7 @@ export namespace org.unirail.AdHoc {
             if (!zero) {
                 subtract16(LD9(LD), RM, GP); // the gap to the next multiple: d - r
                 const half = compare16(RM, GP);
-                if (roundUp(mode, neg, half < 0 ? -1 : half === 0 ? 0 : 1, (QN[0] & 1) === 1))
-                    for (let k = 0; k < 8 && ++QN[k] === P16; k++) QN[k] = 0;
+                if (roundUp(mode, neg, half < 0 ? -1 : half === 0 ? 0 : 1, (QN[0] & 1) === 1)) for (let k = 0; k < 8 && ++QN[k] === P16; k++) QN[k] = 0;
             }
             if (0x8000 <= QN[7]) throw new RangeError("Decimal out of the 128-bit range");
             for (let k = 0; k < 4; k++) W[k] = QN[2 * k] + QN[2 * k + 1] * P16;
@@ -15813,9 +15925,7 @@ export namespace org.unirail.AdHoc {
 
         /** `x` at scale `from` as units at scale `to` (0..38), rounded by `mode`; past 127 bits throws `RangeError`. */
         static rescale128(x: Int128, from: number, to: number, mode: RoundingMode): Int128 {
-            return from <= to
-                ? Decimal.quotient128(x, Decimal.pow10_128(to - from, Decimal.p128), Decimal.one128, mode)
-                : Decimal.quotient128(x, Decimal.one128, Decimal.pow10_128(from - to, Decimal.p128), mode);
+            return from <= to ? Decimal.quotient128(x, Decimal.pow10_128(to - from, Decimal.p128), Decimal.one128, mode) : Decimal.quotient128(x, Decimal.one128, Decimal.pow10_128(from - to, Decimal.p128), mode);
         }
     }
 
@@ -15940,7 +16050,7 @@ export namespace org.unirail.AdHoc {
     function quotient(x: number, y: number, d: number, mode: RoundingMode): number {
         if (d === 0) throw new RangeError("Division by zero");
         if (!Number.isSafeInteger(x) || !Number.isSafeInteger(y) || !Number.isSafeInteger(d)) throw new RangeError("Not a safe integer");
-        const neg = (x < 0) !== (y < 0) !== (d < 0);
+        const neg = (x < 0 !== y < 0) !== d < 0;
         x = Math.abs(x);
         y = Math.abs(y);
         const m = Math.abs(d);
@@ -16005,7 +16115,6 @@ export namespace org.unirail.AdHoc {
                 throw new RangeError("Rounding necessary");
         }
     }
-
 //#endregion
 
     export function toString(src: DataView, start?: number, end?: number): string {

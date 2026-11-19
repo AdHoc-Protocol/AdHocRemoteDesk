@@ -136,8 +136,7 @@ export namespace Float64List {
             // No `src.size > this.size` shortcut: `src` may repeat values ([1,1,1] is contained in [1]).
             if (src.isEmpty) return true;
             const elements = new Set(this.values.subarray(0, this._size));
-            for (const value of src)
-                if (!elements.has(value)) return false;
+            for (const value of src) if (!elements.has(value)) return false;
             return true;
         }
 
@@ -295,7 +294,8 @@ export namespace Float64List {
                 const mid = (lo + hi) >>> 1,
                     x = v[mid];
                 if (x < value) lo = mid + 1;
-                else if (x > value || x !== x) hi = mid - 1; // NaN is greater than any value
+                else if (x > value || x !== x)
+                    hi = mid - 1; // NaN is greater than any value
                 else return mid;
             }
             return -(lo + 1);
@@ -439,13 +439,20 @@ export namespace Float64List {
     }
 
     /**
+     * Whether `set` takes a whole plain array: of numbers yes, of BigInt values no - those are heap objects, and `set` from
+     * an array of them goes item by item through the runtime, about 15x slower than the loop (Node 25, 100 000 items).
+     * @private
+     */
+    const setPlain = typeof new Float64Array(1)[0] === "number";
+
+    /**
      * Copies `len` items of `src` from `si` on into `dst` at `at`: one `set` for a typed source (no temporary copy) or a
-     * whole plain array, an element loop otherwise. A source sharing `dst`'s buffer is safe: `set` copies it first.
+     * whole plain array of numbers, an element loop otherwise. A source sharing `dst`'s buffer is safe: `set` copies it first.
      * @private
      */
     function copyIn(dst: Float64Array, at: number, src: ArrayLike<number>, si: number, len: number): void {
         if (ArrayBuffer.isView(src) && typeof (src as any).subarray === "function") dst.set((src as Float64Array).subarray(si, si + len), at);
-        else if (si === 0 && len === src.length) dst.set(src, at);
+        else if (setPlain && si === 0 && len === src.length) dst.set(src, at);
         else for (let i = 0; i < len; i++) dst[at + i] = src[si + i];
     }
 
@@ -474,8 +481,9 @@ export namespace Float64List {
          *                       • positive → initial logical size; the first
          *                         `sizeOrCapacity` slots are pre-filled with
          *                         `defaultValue` and capacity is at least that much;
-         *                       • negative → capacity only (`-sizeOrCapacity` slots
-         *                         reserved), logical size stays 0;
+         *                       • negative → logical size `-sizeOrCapacity`, NOT filled: every slot
+         *                         reads 0 - no fill pass ( a receiver writes them all ); the room only:
+         *                         `RW.withCapacity`;
          *                       • zero / omitted → empty list.
          * @param defaultValue   Value used to fill new slots whenever the list
          *                       expands. Defaults to `0`.
@@ -483,14 +491,16 @@ export namespace Float64List {
          * const empty    = new Float64List.RW();         // size 0, capacity 0, defaultValue 0
          * const dflt     = new Float64List.RW(0, 15);   // size 0, capacity 0, defaultValue 15 (used on later growth)
          * const filled   = new Float64List.RW(5);        // size 5, slots 0..4 = 0
-         * const reserve  = new Float64List.RW(-10);      // capacity 10, size 0
+         * const unfilled = new Float64List.RW(-10);      // size 10, slots 0..9 = 0, not filled
          * const sentinel = new Float64List.RW(3, 7);    // size 3, slots 0..2 = 7
          */
         constructor(sizeOrCapacity: number = 0, defaultValue: number = 0) {
             super(defaultValue);
             const capacity = sizeOrCapacity < 0 ? -sizeOrCapacity : sizeOrCapacity;
             if (capacity > 0) this.values = new Float64Array(capacity);
-            if (sizeOrCapacity > 0) {
+            if (sizeOrCapacity < 0)
+                this._size = capacity; // -n: size n, no fill pass - every slot reads 0, not `defaultValue`
+            else if (sizeOrCapacity > 0) {
                 this._size = sizeOrCapacity;
                 if (!Object.is(defaultValue, 0)) this.values.fill(defaultValue, 0, sizeOrCapacity); // Object.is: a `-0` default must be written too
             }
@@ -498,10 +508,12 @@ export namespace Float64List {
 
         /**
          * Creates an empty list with the given backing capacity reserved up front.
-         * Equivalent to `new RW(-capacity, defaultValue)` but reads naturally.
+         * The room only: `new RW(-capacity)` gives a size too.
          */
         static withCapacity(capacity: number, defaultValue: number = 0): RW {
-            return new RW(-capacity, defaultValue);
+            const r = new RW(-capacity, defaultValue);
+            r._size = 0; // the room only
+            return r;
         }
 
         /**
@@ -748,17 +760,17 @@ export namespace Float64List {
          * list.set_(0, [1, 2, 3], 1, 2);
          * console.log(list.toJSON()); // ["2", "3"]
          */
-        public set_( index: number, src: ArrayLike< number>, src_index: number = 0, len: number = src.length ): RW{
-            if( index < 0 || src_index < 0 || len < 0 || !src || src.length < src_index + len ) throw new RangeError( "Invalid arguments" );
-            if( len === 0 ) return this;
+        public set_(index: number, src: ArrayLike<number>, src_index: number = 0, len: number = src.length): RW {
+            if (index < 0 || src_index < 0 || len < 0 || !src || src.length < src_index + len) throw new RangeError("Invalid arguments");
+            if (len === 0) return this;
             const requiredSize = index + len;
-            if( requiredSize > this._size ){
+            if (requiredSize > this._size) {
                 const oldSize = this._size;
-                this.ensureCapacity( requiredSize );
-                if( index > oldSize ) this.values.fill( this.defaultValue, oldSize, index );
+                this.ensureCapacity(requiredSize);
+                if (index > oldSize) this.values.fill(this.defaultValue, oldSize, index);
                 this._size = requiredSize;
             }
-            copyIn( this.values, index, src, src_index, len );
+            copyIn(this.values, index, src, src_index, len);
             return this;
         }
         /**
@@ -809,8 +821,7 @@ export namespace Float64List {
             const initialSize = this._size;
             const valuesToRemove = new Set<number>(src);
             let writeIndex = 0;
-            for (let readIndex = 0; readIndex < this._size; readIndex++)
-                if (!valuesToRemove.has(this.values[readIndex])) this.values[writeIndex++] = this.values[readIndex];
+            for (let readIndex = 0; readIndex < this._size; readIndex++) if (!valuesToRemove.has(this.values[readIndex])) this.values[writeIndex++] = this.values[readIndex];
             this._size = writeIndex;
             return initialSize - this._size;
         }
@@ -828,8 +839,7 @@ export namespace Float64List {
         public removeAllValue(src: number): number {
             const initialSize = this._size;
             let writeIndex = 0;
-            for (let readIndex = 0; readIndex < this._size; readIndex++)
-                if (!sameValueZero(this.values[readIndex], src)) this.values[writeIndex++] = this.values[readIndex];
+            for (let readIndex = 0; readIndex < this._size; readIndex++) if (!sameValueZero(this.values[readIndex], src)) this.values[writeIndex++] = this.values[readIndex];
             this._size = writeIndex;
             return initialSize - this._size;
         }
@@ -875,8 +885,7 @@ export namespace Float64List {
             const initialSize = this._size;
             const valuesToKeep = new Set<number>(chk);
             let writeIndex = 0;
-            for (let readIndex = 0; readIndex < this._size; readIndex++)
-                if (valuesToKeep.has(this.values[readIndex])) this.values[writeIndex++] = this.values[readIndex];
+            for (let readIndex = 0; readIndex < this._size; readIndex++) if (valuesToKeep.has(this.values[readIndex])) this.values[writeIndex++] = this.values[readIndex];
             this._size = writeIndex;
             return initialSize !== this._size;
         }
@@ -921,7 +930,9 @@ export namespace Float64List {
          * Gets the capacity of the internal array.
          * @returns The length of the internal `Float64Array`.
          */
-        public override get length(): number {            return this.values.length;        }
+        public override get length(): number {
+            return this.values.length;
+        }
 
         /**
          * Sets the list's size, expanding with `defaultValue` or truncating as needed.
@@ -943,7 +954,9 @@ export namespace Float64List {
          * Gets the current number of elements in the list.
          * @returns The number of valid elements.
          */
-        public override get size(): number {            return this._size;        }
+        public override get size(): number {
+            return this._size;
+        }
 
         /**
          * Creates a new array with the results of applying a callback to each element.
@@ -973,8 +986,7 @@ export namespace Float64List {
          */
         public filter(predicate: (value: number, index: number, list: RW) => boolean, thisArg?: any): RW {
             const filteredList = new RW(0, this.defaultValue);
-            for (let i = 0; i < this._size; i++)
-                if (predicate.call(thisArg, this.values[i], i, this)) filteredList.append(this.values[i]);
+            for (let i = 0; i < this._size; i++) if (predicate.call(thisArg, this.values[i], i, this)) filteredList.append(this.values[i]);
             return filteredList;
         }
 

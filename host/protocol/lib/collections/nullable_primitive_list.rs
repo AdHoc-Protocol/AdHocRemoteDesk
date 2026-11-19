@@ -24,9 +24,11 @@ pub struct NullablePrimitiveList<T> {
     values: Vec<T>,
     /// The number of present values.
     count: usize,
-    /// Compressed: `ranks[k]` - the values at indices below `64 k`, one per word of `nulls` begun
-    /// (`len.div_ceil(64)`): the compressed place of index `i` is `ranks[i / 64]` plus a `popcnt`
-    /// of one word. Flat: empty.
+    /// Compressed: `ranks[k]` - the values at indices below `64 k`, one per word of `nulls` up to
+    /// the word of the last value at least (lazy, as C# / Java `ranksCount`: the words past them
+    /// hold no value, their rank is `count`): the compressed place of index `i` is `ranks[i / 64]`
+    /// plus a `popcnt` of one word. A length set ahead ( `with_nulls`, `set_len` ) adds no ranks,
+    /// so values set in order go after all the others with no rank to move. Flat: empty.
     ranks: Vec<usize>,
     flat: bool,
     flat_threshold: usize,
@@ -43,17 +45,31 @@ impl<T: Copy + Default> NullablePrimitiveList<T> {
     /// Does not allocate.
     #[inline]
     pub const fn new() -> Self {
-        Self { nulls: BitList::new(), values: Vec::new(), count: 0, ranks: Vec::new(), flat: false, flat_threshold: DEFAULT_FLAT_THRESHOLD }
+        Self {
+            nulls: BitList::new(),
+            values: Vec::new(),
+            count: 0,
+            ranks: Vec::new(),
+            flat: false,
+            flat_threshold: DEFAULT_FLAT_THRESHOLD,
+        }
     }
 
     /// Room for `capacity` values.
     pub fn with_capacity(capacity: usize) -> Self {
-        Self { nulls: BitList::with_capacity(capacity), values: Vec::with_capacity(capacity), ..Self::new() }
+        Self {
+            nulls: BitList::with_capacity(capacity),
+            values: Vec::with_capacity(capacity),
+            ..Self::new()
+        }
     }
 
-    /// `len` nulls.
+    /// `len` nulls: no fill pass, no ranks yet.
     pub fn with_nulls(len: usize) -> Self {
-        Self { nulls: BitList::filled(false, len), ranks: vec![0; len.div_ceil(64)], ..Self::new() }
+        Self {
+            nulls: BitList::filled(false, len),
+            ..Self::new()
+        }
     }
 
     #[inline(always)]
@@ -114,12 +130,23 @@ impl<T: Copy + Default> NullablePrimitiveList<T> {
         // Present indices are ascending and never below their packed place. Moving values back
         // from the last index, a word of presence bits at a time, therefore preserves every source
         // still to be read; a null gets the default.
+        // From the last value down: the slots past it are at `count` or above, defaults already ( a
+        // list received with its length set ahead goes flat at the threshold - every such pack ).
         let v = self.values.as_mut_ptr();
-        let mut base = len;
+        let mut base = self.nulls.last_one().map_or(0, |last| last + 1);
         while packed != 0 {
             let top = base - 1 & 63; // the last bit of the word
             base -= top + 1;
             let w = self.nulls.get64(base);
+            if w == u64::MAX {
+                // a word of values: one block, in place when nothing before it is a null
+                packed -= 64;
+                if packed != base {
+                    // SAFETY: `packed + 64 <= count` and `base + 64 <= len`; `copy` allows the overlap
+                    unsafe { core::ptr::copy(v.add(packed), v.add(base), 64) };
+                }
+                continue;
+            }
             for b in (0..=top).rev() {
                 let present = w >> b & 1 != 0;
                 // SAFETY: `base + b < len == values.len()`; `packed - 1` (`0` once all are moved)
@@ -147,9 +174,10 @@ impl<T: Copy + Default> NullablePrimitiveList<T> {
         self.ranks_from(0);
     }
 
-    /// Compressed: `ranks` from word `from` (`<= ranks.len()`) on made anew from `nulls`, one
-    /// `popcnt` a word.
+    /// Compressed: `ranks` from word `from` on made anew from `nulls`, one `popcnt` a word - from
+    /// the last word ranked when `from` is past them ( lazy ranks ).
     fn ranks_from(&mut self, from: usize) {
+        let from = from.min(self.ranks.len());
         self.ranks.truncate(from);
         let mut r = match from.checked_sub(1) {
             Some(p) => self.ranks[p] + self.nulls.get64(p << 6).count_ones() as usize,
@@ -192,8 +220,10 @@ impl<T: Copy + Default> NullablePrimitiveList<T> {
     /// The value at `i`; `None` for a null and past the end.
     #[inline]
     pub fn get(&self, i: usize) -> Option<T> {
+        // SAFETY ( both reads ): a set bit is a value - flat, `i < len == values.len()`; compressed, its
+        // place is below `count == values.len()`
         if self.flat {
-            return if self.nulls.get(i) { Some(self.values[i]) } else { None };
+            return if self.nulls.get(i) { Some(unsafe { *self.values.get_unchecked(i) }) } else { None };
         }
         // compressed: one word of presence bits gives both the bit and the place
         let r = *self.ranks.get(i >> 6)?;
@@ -201,7 +231,40 @@ impl<T: Copy + Default> NullablePrimitiveList<T> {
         if w >> b & 1 == 0 {
             return None;
         }
-        Some(self.values[r + (w & ((1u64 << b) - 1)).count_ones() as usize])
+        Some(unsafe { *self.values.get_unchecked(r + (w & ((1u64 << b) - 1)).count_ones() as usize) })
+    }
+
+    /// The group of 8 items from `i` as the sending of optional items writes it: `put` gets the
+    /// value of each present item in index order, the result is their presence bits - bit `k` for
+    /// item `i + k`, 0 past the end. One rank for the group, not one per item: compressed, the values
+    /// of a group lie in a row from it.
+    #[inline]
+    pub fn group8(&self, i: usize, mut put: impl FnMut(T)) -> u8 {
+        let p = self.nulls.get64(i) as u8;
+        if self.flat {
+            if p == u8::MAX {
+                // a full group: 8 slots in a row, no bit to scan
+                for k in 0..8 {
+                    // SAFETY: the 8 bits set: `i + 7 < len == values.len()`
+                    put(unsafe { *self.values.get_unchecked(i + k) });
+                }
+                return p;
+            }
+            let mut w = p as u32;
+            while w != 0 {
+                // SAFETY: a set bit is an index below `len == values.len()`
+                put(unsafe { *self.values.get_unchecked(i + w.trailing_zeros() as usize) });
+                w &= w - 1;
+            }
+        } else {
+            let r = self.rank_below(i);
+            for k in 0..p.count_ones() as usize {
+                // SAFETY: the values of the set bits of the group follow the values before `i`:
+                // `r + k < count == values.len()`
+                put(unsafe { *self.values.get_unchecked(r + k) });
+            }
+        }
+        p
     }
 
     /// Sets index `i` and returns its previous value; past the end the list grows with nulls.
@@ -219,7 +282,11 @@ impl<T: Copy + Default> NullablePrimitiveList<T> {
         let v = value?;
         // SAFETY: `i < len`: compressed has a rank for its word; the place of a set bit is below
         // `values.len()` (`count` compressed, `len` flat)
-        let p = if self.flat { i } else { unsafe { *self.ranks.get_unchecked(i >> 6) + (w & ((1u64 << b) - 1)).count_ones() as usize } };
+        let p = if self.flat {
+            i
+        } else {
+            unsafe { *self.ranks.get_unchecked(i >> 6) + (w & ((1u64 << b) - 1)).count_ones() as usize }
+        };
         Some(mem::replace(unsafe { self.values.get_unchecked_mut(p) }, v))
     }
 
@@ -240,6 +307,8 @@ impl<T: Copy + Default> NullablePrimitiveList<T> {
                 }
             };
         }
+        // a value coming to a word past the ranks ( lazy ): its rank is `count`, every value is before
+        self.ranks_to(i + 1);
         let p = self.ranks[i >> 6] + (w & ((1u64 << (i & 63)) - 1)).count_ones() as usize;
         match value {
             Some(v) => {
@@ -288,6 +357,39 @@ impl<T: Copy + Default> NullablePrimitiveList<T> {
         None
     }
 
+    /// A received value at `i` - past every index set before, as a receiver fills a list in order,
+    /// the length set ahead ( `set_len` ) or not. The items skipped since the last value are not
+    /// written: their bits are 0, nulls by themselves, the ranks of the words skipped made once.
+    /// Compressed, the value goes after all the others: no rank to find, nothing to move ( 1.5-11x
+    /// faster than `set` of every item, nulls included, measured on 16 - 100 000 items ).
+    #[inline]
+    pub fn append(&mut self, i: usize, v: T) {
+        if !self.flat {
+            if self.count < self.flat_threshold {
+                let w = i >> 6;
+                if self.ranks.len() <= w {
+                    self.ranks.resize(w + 1, self.count); // the words up to `i`'s: all values before them
+                } else if w + 1 < self.ranks.len() {
+                    // ranked past `i` ( after `insert` / `remove` ): the words after it got a value before them
+                    for x in &mut self.ranks[w + 1..] {
+                        *x += 1;
+                    }
+                }
+                self.values.push(v);
+                self.count += 1;
+                self.nulls.set1(i);
+                return;
+            }
+            self.make_flat();
+        }
+        if self.values.len() <= i {
+            self.values.resize(i + 1, T::default());
+        }
+        self.values[i] = v;
+        self.count += 1;
+        self.nulls.set1(i);
+    }
+
     #[inline]
     pub fn push(&mut self, value: Option<T>) {
         // The value goes to the end of `values` (the compressed place of the last index is `count`,
@@ -299,8 +401,8 @@ impl<T: Copy + Default> NullablePrimitiveList<T> {
         if some | self.flat {
             self.values.push(value.unwrap_or_default());
         }
-        if !self.flat && self.nulls.len() & 63 == 0 {
-            self.ranks.push(self.count); // a word begun
+        if some && !self.flat {
+            self.ranks_to(self.nulls.len() + 1); // the word of a value ranked ( lazy: a null needs none )
         }
         self.count += some as usize;
         self.nulls.push(some);
@@ -384,7 +486,8 @@ impl<T: Copy + Default> NullablePrimitiveList<T> {
         }
     }
 
-    /// Sets the length: shortens, or grows with nulls.
+    /// Sets the length: shortens, or grows with nulls - compressed with no fill pass and no ranks
+    /// ( lazy ): a receiver sets the length ahead and puts only the values, in order.
     pub fn set_len(&mut self, len: usize) {
         if len < self.len() {
             self.count = self.rank_below(len);
@@ -394,8 +497,6 @@ impl<T: Copy + Default> NullablePrimitiveList<T> {
         } else {
             if self.flat {
                 self.values.resize(len, T::default());
-            } else {
-                self.ranks_to(len);
             }
             self.nulls.set_len(len);
         }
@@ -459,23 +560,84 @@ impl<T: Copy + Default> NullablePrimitiveList<T> {
 
     #[inline]
     pub fn iter(&self) -> Iter<'_, T> {
-        Iter { nulls: self.nulls.iter(), bits: &self.nulls, values: &self.values, pos: 0, n: 0, flat: self.flat }
+        Iter {
+            nulls: self.nulls.iter(),
+            bits: &self.nulls,
+            values: &self.values,
+            pos: 0,
+            n: 0,
+            flat: self.flat,
+        }
     }
+}
+
+/// Items compared a block at a time into a mask, with no exit inside a block: the compiler makes the
+/// block a few vector compares and a move of their mask ( as `Array.IndexOf` of C# ); the place in
+/// the block is a bit scan of the mask. Measured on `i32`: 16 beats 8 and 32, a hit at the start
+/// costs as a plain `position`, a miss of 1000 items 5x less.
+const SEARCH_BLOCK: usize = 16;
+
+/// The items of block `b` ( [`SEARCH_BLOCK`] of them ) equal to `v`, a bit each.
+#[inline(always)]
+fn block_mask<T: Copy + PartialEq>(b: &[T], v: T) -> u32 {
+    b.iter().enumerate().fold(0u32, |m, (i, x)| m | ((*x == v) as u32) << i)
+}
+
+/// The first `x == v` in `s`, by blocks of [`SEARCH_BLOCK`].
+#[inline]
+fn position<T: Copy + PartialEq>(s: &[T], v: T) -> Option<usize> {
+    let mut blocks = s.chunks_exact(SEARCH_BLOCK);
+    let mut base = 0;
+    for b in &mut blocks {
+        let m = block_mask(b, v);
+        if m != 0 {
+            return Some(base + m.trailing_zeros() as usize);
+        }
+        base += SEARCH_BLOCK;
+    }
+    blocks.remainder().iter().position(|x| *x == v).map(|p| base + p)
+}
+
+/// The last `x == v` in `s`, by blocks of [`SEARCH_BLOCK`] from the end.
+#[inline]
+fn rposition<T: Copy + PartialEq>(s: &[T], v: T) -> Option<usize> {
+    let mut blocks = s.rchunks_exact(SEARCH_BLOCK);
+    let mut end = s.len();
+    for b in &mut blocks {
+        end -= SEARCH_BLOCK;
+        let m = block_mask(b, v);
+        if m != 0 {
+            return Some(end + 31 - m.leading_zeros() as usize);
+        }
+    }
+    blocks.remainder().iter().rposition(|x| *x == v)
 }
 
 impl<T: Copy + Default + PartialEq> NullablePrimitiveList<T> {
     pub fn index_of(&self, value: Option<T>) -> Option<usize> {
         match value {
             None => self.nulls.next_zero(0),
-            Some(v) if self.flat => self.nulls.ones().find(|&i| self.values[i] == v),
-            Some(v) => self.values.iter().position(|x| *x == v).and_then(|n| self.nulls.nth_one(n)),
+            // a null slot holds the default: the default value goes by the presence bits, any other by
+            // the slots - a match is a value
+            Some(v) if self.flat && v == T::default() => self.nulls.ones().find(|&i| self.values[i] == v),
+            Some(v) if self.flat => {
+                let mut from = 0;
+                while let Some(p) = position(&self.values[from..], v) {
+                    if self.nulls.get(from + p) {
+                        return Some(from + p);
+                    }
+                    from += p + 1;
+                }
+                None
+            }
+            Some(v) => position(&self.values, v).and_then(|n| self.nulls.nth_one(n)),
         }
     }
 
     pub fn last_index_of(&self, value: Option<T>) -> Option<usize> {
         match value {
             None => self.nulls.prev_zero(self.len()),
-            Some(v) if self.flat => {
+            Some(v) if self.flat && v == T::default() => {
                 let mut before = self.len();
                 while let Some(i) = self.nulls.prev_one(before) {
                     if self.values[i] == v {
@@ -485,7 +647,17 @@ impl<T: Copy + Default + PartialEq> NullablePrimitiveList<T> {
                 }
                 None
             }
-            Some(v) => self.values.iter().rposition(|x| *x == v).and_then(|n| self.nulls.nth_one(n)),
+            Some(v) if self.flat => {
+                let mut before = self.values.len();
+                while let Some(i) = rposition(&self.values[..before], v) {
+                    if self.nulls.get(i) {
+                        return Some(i);
+                    }
+                    before = i;
+                }
+                None
+            }
+            Some(v) => rposition(&self.values, v).and_then(|n| self.nulls.nth_one(n)),
         }
     }
 
@@ -585,17 +757,16 @@ impl<T: Copy> Iterator for Iter<'_, T> {
     #[inline]
     fn next(&mut self) -> Option<Option<T>> {
         let present = self.nulls.next()?;
+        // the place by a select, not a branch: flat - the index, compressed - the next value ( `n`
+        // counts for the flat layout too, unused there )
+        let i = if self.flat { self.pos } else { self.n };
         self.pos += 1;
         if !present {
             return Some(None);
         }
-        let i = if self.flat {
-            self.pos - 1
-        } else {
-            self.n += 1;
-            self.n - 1
-        };
-        Some(Some(self.values[i]))
+        self.n += 1;
+        // SAFETY: a present item: flat, `i < len == values.len()`; compressed, `i < count`
+        Some(Some(unsafe { *self.values.get_unchecked(i) }))
     }
 
     #[inline]
@@ -685,14 +856,93 @@ mod tests {
 
 #[cfg(test)]
 impl<T: Copy + Default> NullablePrimitiveList<T> {
-    /// `ranks` as `nulls` makes them: one per word begun in compressed, none in flat.
+    /// `ranks` as `nulls` makes them: compressed, one per word from the first up to the word of the
+    /// last value at least and none past the words begun ( lazy ); none in flat.
     pub(crate) fn assert_ranks(&self) {
         if self.flat {
             assert!(self.ranks.is_empty(), "ranks in flat");
             return;
         }
         let want: Vec<usize> = (0..self.len().div_ceil(64)).map(|k| if k == 0 { 0 } else { self.nulls.rank((k << 6) - 1) }).collect();
-        assert_eq!(self.ranks, want, "ranks");
+        let need = self.nulls.last_one().map_or(0, |i| (i >> 6) + 1);
+        assert!(
+            need <= self.ranks.len() && self.ranks.len() <= want.len(),
+            "ranks: {} of {}, the last value in word {need}",
+            self.ranks.len(),
+            want.len()
+        );
+        assert_eq!(self.ranks[..], want[..self.ranks.len()], "ranks");
         assert_eq!(self.values.len(), self.count, "values");
+    }
+}
+
+#[cfg(test)]
+mod append_tests {
+    use super::*;
+
+    fn rnd(s: &mut u64) -> u64 {
+        *s ^= *s << 13;
+        *s ^= *s >> 7;
+        *s ^= *s << 17;
+        *s
+    }
+
+    /// Receiver order: ascending indices, only the values by `append` - against `set`, the length set
+    /// ahead and not, every strategy and the switch between them; then edits in the middle over the
+    /// lazy ranks.
+    #[test]
+    fn append_matches_set() {
+        for threshold in [1024usize, 0, 7] {
+            for preset in [true, false] {
+                let mut s = threshold as u64 * 2 + preset as u64 + 1;
+                for _ in 0..400 {
+                    let n = (rnd(&mut s) % 3000) as usize;
+                    let dens = rnd(&mut s) % 101;
+                    let (mut a, mut b) = (NullablePrimitiveList::<u32>::new(), NullablePrimitiveList::<u32>::new());
+                    a.set_flat_threshold(threshold);
+                    b.set_flat_threshold(threshold);
+                    if preset {
+                        a.set_len(n);
+                    }
+                    for i in 0..n {
+                        if rnd(&mut s) % 100 < dens {
+                            let x = rnd(&mut s) as u32;
+                            a.append(i, x);
+                            b.set(i, Some(x));
+                        }
+                    }
+                    a.set_len(n);
+                    b.set_len(n);
+                    a.assert_ranks();
+                    assert_eq!(a, b, "threshold {threshold} preset {preset} n {n}");
+                    for _ in 0..20.min(n) {
+                        if a.is_empty() {
+                            break;
+                        }
+                        let i = (rnd(&mut s) % a.len() as u64) as usize;
+                        match rnd(&mut s) % 3 {
+                            0 => {
+                                let v = Some(rnd(&mut s) as u32);
+                                a.set(i, v);
+                                b.set(i, v);
+                            }
+                            1 => {
+                                a.set(i, None);
+                                b.set(i, None);
+                            }
+                            _ => {
+                                a.remove(i);
+                                b.remove(i);
+                            }
+                        }
+                        a.assert_ranks();
+                    }
+                    assert_eq!(a, b);
+                    for i in 0..a.len() {
+                        assert_eq!(a.get(i), b.get(i));
+                    }
+                }
+            }
+        }
     }
 }

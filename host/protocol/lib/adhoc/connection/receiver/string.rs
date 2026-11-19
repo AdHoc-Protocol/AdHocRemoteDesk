@@ -96,7 +96,23 @@ impl<'a> Rx<'a> {
             };
             if len as u64 <= max_chars as u64 && p + h + len <= self.byte_max {
                 let src = &self.buffer[p + h..p + h + len];
-                if crate::lib::adhoc::ascii::prefix(src) == len {
+                if len <= 32 {
+                    // a short string: checked for ASCII by word loads, then copied into its memory by
+                    // the same words - no call of memcpy, no scan of bytes; one that is not ASCII goes
+                    // below and takes no memory here
+                    if crate::lib::adhoc::ascii::is_short(src) {
+                        let mut v = self.st.spare_bytes();
+                        v.reserve(len);
+                        // SAFETY: `v` has room for `len` bytes and is not the window; they are ASCII
+                        unsafe {
+                            crate::lib::adhoc::ascii::copy_short(src, v.as_mut_ptr());
+                            v.set_len(len);
+                        }
+                        self.st.str = Some(unsafe { String::from_utf8_unchecked(v) });
+                        self.byte_ = p + h + len;
+                        return true;
+                    }
+                } else if crate::lib::adhoc::ascii::prefix(src) == len {
                     let mut v = self.st.spare_bytes();
                     v.extend_from_slice(src);
                     // SAFETY: every byte is ASCII
@@ -127,7 +143,10 @@ impl<'a> Rx<'a> {
 
     pub(super) fn check_length_and_getting_string(&mut self) -> Result<bool, RxError> {
         if (self.st.u4 as u64) < self.st.u8 {
-            return Err(RxError::Overflow { got: self.st.u8, max: self.st.u4 as u64 });
+            return Err(RxError::Overflow {
+                got: self.st.u8,
+                max: self.st.u4 as u64,
+            });
         }
         self.st.u8_ = self.st.u8; // the length
         self.st.u4 = 0; // characters received
@@ -224,6 +243,14 @@ impl<'a> Rx<'a> {
                 // a run of units U+0800..=U+FFFF: two or three bytes each in varints, three in
                 // UTF-8
                 let (n, units) = crate::lib::adhoc::ascii::varints_to_three(&self.buffer[pos..limit], target - count, &mut st.bys);
+                if 0 < n {
+                    pos += n;
+                    count += units;
+                    continue;
+                }
+                // the rest of every width in one loop: surrogate pairs, short runs and the changes
+                // of width of mixed text - not a unit at a time
+                let (n, units) = crate::lib::adhoc::ascii::varints_to_utf8(&self.buffer[pos..limit], target - count, &mut st.bys);
                 if 0 < n {
                     pos += n;
                     count += units;
@@ -386,6 +413,20 @@ pub(crate) fn str_sink(src: &mut Rx<'_>, t: &mut RxText) {
                     i += n;
                     continue;
                 }
+                // a run of units U+0800..=U+FFFF, then the rest of every width in one loop
+                // ( surrogate pairs, mixed text )
+                let (n, units) = crate::lib::adhoc::ascii::varints_to_three(&b[i..], usize::MAX, &mut t.bytes);
+                if 0 < n {
+                    t.units += units;
+                    i += n;
+                    continue;
+                }
+                let (n, units) = crate::lib::adhoc::ascii::varints_to_utf8(&b[i..], usize::MAX, &mut t.bytes);
+                if 0 < n {
+                    t.units += units;
+                    i += n;
+                    continue;
+                }
             }
             let x = b[i];
             i += 1;
@@ -503,6 +544,69 @@ mod text_tests {
         assert_eq!(t.finish(), want);
     }
 
+    /// The leaf of a chain reads what the units are: every width, mixed, pairs, lone surrogates,
+    /// overlong and broken varints - as `String::from_utf16_lossy` makes the units the varints end.
+    #[test]
+    fn the_leaf_reads_units_of_every_width() {
+        let mut s = 0x9E37_79B9_7F4A_7C15u64;
+        let mut rnd = |n: u64| {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            s % n
+        };
+        for _ in 0..3000 {
+            let (mut wire, mut units) = (Vec::new(), Vec::new());
+            for _ in 0..rnd(60) {
+                let class = rnd(12);
+                let (u, bytes) = match class {
+                    0..=2 => (rnd(0x80) as u32, 0),
+                    3 => (0x80 + rnd(0x780) as u32, 0),
+                    4 => (0x800 + rnd(0x3800) as u32, 0),
+                    5 => (0x4000 + rnd(0xC000) as u32, 0),
+                    6 => (0xD800 + rnd(0x400) as u32, 0),
+                    7 => (0xDC00 + rnd(0x400) as u32, 0),
+                    8 => (rnd(0x80) as u32, 2), // overlong
+                    9 => (rnd(0x4000) as u32, 3),
+                    10 => {
+                        let c = rnd(0x100000) as u32;
+                        for v in [0xD800 + (c >> 10), 0xDC00 + (c & 0x3FF)] {
+                            wire.extend_from_slice(&[0x80 | v as u8, 0x80 | (v >> 7) as u8, (v >> 14) as u8]);
+                            units.push(v as u16);
+                        }
+                        continue;
+                    }
+                    _ => {
+                        wire.extend_from_slice(&[0xFF, 0xFF, 0xFF, rnd(0x80) as u8]); // past three bytes
+                        units.push(0xFFFD);
+                        continue;
+                    }
+                };
+                let n = if bytes != 0 {
+                    bytes
+                } else if u < 0x80 {
+                    1
+                } else if u < 0x4000 {
+                    2
+                } else {
+                    3
+                };
+                for k in 0..n {
+                    let b = (u >> (7 * k)) as u8 & 0x7F;
+                    wire.push(if k + 1 < n { b | 0x80 } else { b });
+                }
+                units.push(u as u16);
+            }
+            let mut st = RxState::new(1);
+            let mut rx = Rx::new(&wire, &mut st);
+            let mut t = RxText::default();
+            t.arm(false, u32::MAX);
+            str_sink(&mut rx, &mut t);
+            assert_eq!(t.units, units.len());
+            assert_eq!(t.finish(), String::from_utf16_lossy(&units));
+        }
+    }
+
     /// The path of a string whole in the window and the one of a string cut by it agree: ASCII and
     /// not, lengths around the one-byte length, windows of every size; two strings in a row - the
     /// state the first leaves does not spoil the second.
@@ -510,7 +614,7 @@ mod text_tests {
     fn whole_and_cut_strings_agree() {
         for len in [0usize, 1, 5, 126, 127, 128, 200] {
             for wide in [false, true] {
-                let want: String = (0..len).map(|i| if wide && i == len / 2 { 'λ' } else { (b'a' + (i % 26) as u8) as char }).collect();
+                let want: String = (0..len).map(|i| if wide && i == len / 2 { 'ж' } else { (b'a' + (i % 26) as u8) as char }).collect();
                 let mut wire = Vec::new();
                 for _ in 0..2 {
                     let mut n = want.encode_utf16().count() as u32;

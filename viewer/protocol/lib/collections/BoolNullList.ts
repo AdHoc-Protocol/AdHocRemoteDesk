@@ -40,8 +40,8 @@ export namespace BoolNullList {
     export abstract class R extends BitsList._R {
         /**
          * @param sizeOrCapacity Combined size/capacity: positive → initial size (slots are
-         *                       pre-filled with `defaultValue`), negative → capacity only,
-         *                       zero/omitted → empty.
+         *                       pre-filled with `defaultValue`), negative → size `-sizeOrCapacity`, not
+         *                       filled (raw 0 - `false`), zero/omitted → empty. The room only: `RW.withCapacity`.
          * @param defaultValue   Value used to fill new slots when the list expands.
          *                       Defaults to `undefined` so freshly extended slots read as null.
          *                       Encoded internally as a 2-bit value (2 = undefined, 1 = true, 0 = false).
@@ -49,7 +49,7 @@ export namespace BoolNullList {
         protected constructor(sizeOrCapacity: number = 0, defaultValue: boolean | undefined = undefined) {
             const encoded = defaultValue === undefined ? 2 : defaultValue ? 1 : 0;
             super(2, encoded, sizeOrCapacity); // BitsList (bits, default, size): a negative size is not filled...
-            if (sizeOrCapacity < 0) this._size = 0; // ...and here a negative value is a capacity only
+            // ...a negative size here too: `-size` items, not filled ( a receiver writes them all ); the room only - withCapacity
         }
 
         /**
@@ -59,11 +59,16 @@ export namespace BoolNullList {
          * @returns {boolean} True if the value is found in the list, false otherwise.
          */
         contains(value: boolean | undefined): boolean {
-            return -1 < super._indexOf(value === undefined ?
-                                       2 : // Represent undefined as 2 for internal search
-                                       value ?
-                                       1 : // Represent true as 1 for internal search
-                                       0);  // Represent false as 0 for internal search
+            return (
+                -1 <
+                super._indexOf(
+                    value === undefined
+                        ? 2 // Represent undefined as 2 for internal search
+                        : value
+                          ? 1 // Represent true as 1 for internal search
+                          : 0,
+                )
+            ); // Represent false as 0 for internal search
         }
 
         /**
@@ -73,11 +78,13 @@ export namespace BoolNullList {
          * @returns {number} The index of the first occurrence, or -1 if not found.
          */
         indexOf(value: boolean | undefined): number {
-            return super._indexOf(value === undefined ?
-                                  2 : // Represent undefined as 2 for internal search
-                                  value ?
-                                  1 : // Represent true as 1 for internal search
-                                  0);  // Represent false as 0 for internal search
+            return super._indexOf(
+                value === undefined
+                    ? 2 // Represent undefined as 2 for internal search
+                    : value
+                      ? 1 // Represent true as 1 for internal search
+                      : 0,
+            ); // Represent false as 0 for internal search
         }
 
         /**
@@ -87,11 +94,14 @@ export namespace BoolNullList {
          * @returns {number} The index of the last occurrence, or -1 if not found.
          */
         lastIndexOf(value: boolean | undefined): number {
-            return super._lastIndexOf_(this._size, value === undefined ?
-                                                   2 : // Represent undefined as 2 for internal search
-                                                   value ?
-                                                   1 : // Represent true as 1 for internal search
-                                                   0);  // Represent false as 0 for internal search
+            return super._lastIndexOf_(
+                this._size,
+                value === undefined
+                    ? 2 // Represent undefined as 2 for internal search
+                    : value
+                      ? 1 // Represent true as 1 for internal search
+                      : 0,
+            ); // Represent false as 0 for internal search
         }
 
         /**
@@ -102,11 +112,14 @@ export namespace BoolNullList {
          * @returns {number} The index of the last occurrence, or -1 if not found.
          */
         lastIndexOf_(from: number, value: boolean | undefined) {
-            return super._lastIndexOf_(from, value === undefined ?
-                                             2 : // Represent undefined as 2 for internal search
-                                             value ?
-                                             1 : // Represent true as 1 for internal search
-                                             0);  // Represent false as 0 for internal search
+            return super._lastIndexOf_(
+                from,
+                value === undefined
+                    ? 2 // Represent undefined as 2 for internal search
+                    : value
+                      ? 1 // Represent true as 1 for internal search
+                      : 0,
+            ); // Represent false as 0 for internal search
         }
 
         /**
@@ -118,9 +131,9 @@ export namespace BoolNullList {
          */
         get(index: number): boolean | undefined {
             const value = this.raw(index);
-            return value === 2 ?
-                   undefined : // Return undefined if internal value is 2 (representing undefined/null)
-                   value === 1;  // Return true if internal value is 1, otherwise (implicitly 0) return false
+            return value === 2
+                ? undefined // Return undefined if internal value is 2 (representing undefined/null)
+                : value === 1; // Return true if internal value is 1, otherwise (implicitly 0) return false
         }
 
         /**
@@ -193,10 +206,12 @@ export namespace BoolNullList {
 
         /**
          * Creates an empty list with backing capacity reserved up front.
-         * Equivalent to `new RW(-capacity, defaultValue)`.
+         * The room only: `new RW(-capacity)` gives a size too.
          */
         static withCapacity(capacity: number, defaultValue: boolean | undefined = undefined): RW {
-            return new RW(-capacity, defaultValue);
+            const r = new RW(-capacity, defaultValue);
+            r._size = 0; // the room only
+            return r;
         }
 
         /**
@@ -223,7 +238,7 @@ export namespace BoolNullList {
          * @returns A new RW instance containing those values.
          */
         copy_of(values: Uint8Array): RW {
-            const r = new RW(-values.length); // reserve capacity for `values.length` items
+            const r = new RW(-values.length); // `values.length` items, not filled: written below
             R.set_(r, 0, values);
             return r;
         }
@@ -234,11 +249,14 @@ export namespace BoolNullList {
          * @param {boolean | undefined} value The boolean value or undefined to add.
          */
         add(value: boolean | undefined) {
-            BitsList.R.add(this, value === undefined ?
-                                 2 : // Represent undefined as 2 for internal storage
-                                 value ?
-                                 1 : // Represent true as 1 for internal storage
-                                 0);  // Represent false as 0 for internal storage
+            BitsList.R.add(
+                this,
+                value === undefined
+                    ? 2 // Represent undefined as 2 for internal storage
+                    : value
+                      ? 1 // Represent true as 1 for internal storage
+                      : 0,
+            ); // Represent false as 0 for internal storage
         }
 
         /**
@@ -248,11 +266,15 @@ export namespace BoolNullList {
          * @param {boolean | undefined} value The boolean value or undefined to insert.
          */
         add_(index: number, value: boolean | undefined) {
-            R.add_(this, index, value === undefined ?
-                                2 : // Represent undefined as 2 for internal storage
-                                value ?
-                                1 : // Represent true as 1 for internal storage
-                                0);  // Represent false as 0 for internal storage
+            R.add_(
+                this,
+                index,
+                value === undefined
+                    ? 2 // Represent undefined as 2 for internal storage
+                    : value
+                      ? 1 // Represent true as 1 for internal storage
+                      : 0,
+            ); // Represent false as 0 for internal storage
         }
 
         /**
@@ -277,11 +299,14 @@ export namespace BoolNullList {
          * @param {boolean | undefined} value The boolean value or undefined to remove.
          */
         remove_(value: boolean | undefined) {
-            R.remove(this, value === undefined ?
-                           2 : // Represent undefined as 2 for internal removal
-                           value ?
-                           1 : // Represent true as 1 for internal removal
-                           0);  // Represent false as 0 for internal removal
+            R.remove(
+                this,
+                value === undefined
+                    ? 2 // Represent undefined as 2 for internal removal
+                    : value
+                      ? 1 // Represent true as 1 for internal removal
+                      : 0,
+            ); // Represent false as 0 for internal removal
         }
 
         /**
@@ -289,11 +314,7 @@ export namespace BoolNullList {
          * @returns The number of items removed.
          */
         removeAll(value: boolean | undefined): number {
-            return R.remove(this, value === undefined ?
-                                  2 :
-                                  value ?
-                                  1 :
-                                  0);
+            return R.remove(this, value === undefined ? 2 : value ? 1 : 0);
         }
 
         /**
@@ -312,11 +333,15 @@ export namespace BoolNullList {
          * @throws RangeError if the list is empty.
          */
         set last(value: boolean | undefined) {
-            R.set(this, this._size - 1, value === undefined ?
-                                        2 : // Represent undefined as 2 for internal storage
-                                        value ?
-                                        1 : // Represent true as 1 for internal storage
-                                        0);  // Represent false as 0 for internal storage
+            R.set(
+                this,
+                this._size - 1,
+                value === undefined
+                    ? 2 // Represent undefined as 2 for internal storage
+                    : value
+                      ? 1 // Represent true as 1 for internal storage
+                      : 0,
+            ); // Represent false as 0 for internal storage
         }
 
         /**
@@ -335,11 +360,15 @@ export namespace BoolNullList {
          * @param {boolean | undefined} value The boolean value or undefined to set.
          */
         set1_(index: number, value: boolean | undefined) {
-            R.set(this, index, value === undefined ?
-                               2 : // Represent undefined as 2 for internal storage
-                               value ?
-                               1 : // Represent true as 1 for internal storage
-                               0);  // Represent false as 0 for internal storage
+            R.set(
+                this,
+                index,
+                value === undefined
+                    ? 2 // Represent undefined as 2 for internal storage
+                    : value
+                      ? 1 // Represent true as 1 for internal storage
+                      : 0,
+            ); // Represent false as 0 for internal storage
         }
 
         /**
@@ -385,14 +414,8 @@ export namespace BoolNullList {
             const len = values.length;
             if (len === 0) return this;
             R.begin(this, index, len); // storage, the default-filled gap before `index`, the size: once; throws for index < 0
-            for (let i = 0; i < len; i++) {
-                const value = values[i];
-                R.put1(this, index + i, value === undefined ?
-                                        2 : // Represent undefined as 2 for internal storage
-                                        value ?
-                                        1 : // Represent true as 1 for internal storage
-                                        0);  // Represent false as 0 for internal storage
-            }
+            // Packed a word at a time: `undefined` as 2, and `true & 3` is 1, `false & 3` is 0 - the codes of the storage.
+            R.put(this, index, values as unknown as ArrayLike<number | undefined>, 0, len, 2);
             return this;
         }
 

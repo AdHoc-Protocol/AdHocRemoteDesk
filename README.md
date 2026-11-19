@@ -390,7 +390,7 @@ It shows a line to send to you, and waits for you at once:
 | | The user of the remote computer | Starts `adhoc-remotedesk` and presses **3**: the first time it pastes the relay, its password and address in one line |
 | ① | The program | Sends the password and its id, 8 random bytes of this start, to the port of requests of the relay, and gets a port nobody else holds: `41933` in the line. The port is given to the id, not to an address: only knocks with it open the port |
 | ② | The program | Prints the line, and puts it in the clipboard |
-| ③ | The program | Knocks at the port, the password and the id, every 20 seconds, and dials it from then on - a try waits up to 10 seconds, the system sends its SYN again within it. It dials out, so its own NAT lets the answer in. Only an address that knocked can wait at the port: a stranger who finds it never takes the place of the program |
+| ③ | The program | Knocks at the port, the password and the id, every 20 seconds, and dials it from then on - a try waits up to 3 seconds, the system sends its SYN again within it -, from one source port, the knocks from it too. It dials out, so its own NAT lets the answer in. Only an address that knocked can wait at the port - by that port, when its NAT keeps it -: a stranger who finds it, or a viewer behind the same NAT, never takes the place of the program |
 | ④ | The user of the remote computer | Sends you the line, the token in it, by chat or mail |
 | ⑤ | You | Press **3** on the page and paste the whole line on its arrow, as it came: the page connects |
 | ⑥ | The relay | Joins the two attempts into one connection, in its kernel. From then on it passes the data like a forwarded port |

@@ -218,14 +218,26 @@ mod crash {
         let thread = thread.name().map(String::from).unwrap_or_else(|| format!("{:?}", thread.id()));
         let mut t = SystemTime::default();
         GetLocalTime(&mut t);
-        let mut v = OsVersion { size: std::mem::size_of::<OsVersion>() as u32, major: 0, minor: 0, build: 0, platform: 0, service_pack: [0; 128] };
+        let mut v = OsVersion {
+            size: std::mem::size_of::<OsVersion>() as u32,
+            major: 0,
+            minor: 0,
+            build: 0,
+            platform: 0,
+            service_pack: [0; 128],
+        };
         RtlGetVersion(&mut v);
         let exe = std::env::current_exe().unwrap_or_default();
 
         let mut text = String::new();
         let _ = writeln!(text, "{}-{:02}-{:02} {:02}:{:02}:{:02}", t.year, t.month, t.day, t.hour, t.minute, t.second);
         let _ = writeln!(text, "{}, Windows {}.{} build {}", exe.display(), v.major, v.minor, v.build);
-        let _ = writeln!(text, "The program crashed: {:#010x} {}, in {module} + {offset:#x}, the thread {thread}", record.code, named(record.code));
+        let _ = writeln!(
+            text,
+            "The program crashed: {:#010x} {}, in {module} + {offset:#x}, the thread {thread}",
+            record.code,
+            named(record.code)
+        );
         if record.code == 0xC000_0005 && record.parameters >= 2 {
             let how = match record.information[0] {
                 0 => "reading",

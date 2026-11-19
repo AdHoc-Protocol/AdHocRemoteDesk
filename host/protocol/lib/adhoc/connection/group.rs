@@ -36,7 +36,13 @@ struct Places<T> {
 
 impl<T> Default for Places<T> {
     fn default() -> Self {
-        Self { v: Vec::new(), live: 0, holes: 0, walking: 0, gone: Vec::new() }
+        Self {
+            v: Vec::new(),
+            live: 0,
+            holes: 0,
+            walking: 0,
+            gone: Vec::new(),
+        }
     }
 }
 
@@ -154,7 +160,10 @@ pub struct GroupMember<M, S = ()> {
 
 impl<M, S> GroupMember<M, S> {
     pub fn new(value: M) -> Self {
-        Self { value, slot: Mutex::new(MemberSlot { group: None, index: 0 }) }
+        Self {
+            value,
+            slot: Mutex::new(MemberSlot { group: None, index: 0 }),
+        }
     }
 
     /// The group it is a member of; `None` — none.
@@ -208,7 +217,12 @@ impl<M, S: Default> Group<M, S> {
 impl<M, S> Group<M, S> {
     /// A group whose members share `state`.
     pub fn with(state: S) -> Self {
-        Self { state, lock: FastReentrantSpinLock::new(), members: UnsafeCell::new(Places::default()), list: Mutex::new(None) }
+        Self {
+            state,
+            lock: FastReentrantSpinLock::new(),
+            members: UnsafeCell::new(Places::default()),
+            list: Mutex::new(None),
+        }
     }
 
     /// A member moved to place `i`.
@@ -334,7 +348,11 @@ impl<M: Send + Sync + 'static, S: Send + Sync + 'static, L: Send + Sync + 'stati
 impl<M, S, L> Groups<M, S, L> {
     /// A list whose groups share `state`.
     pub fn with(state: L) -> Self {
-        Self { state, lock: FastReentrantSpinLock::new(), groups: UnsafeCell::new(Places::default()) }
+        Self {
+            state,
+            lock: FastReentrantSpinLock::new(),
+            groups: UnsafeCell::new(Places::default()),
+        }
     }
 
     /// A group moved to place `i`.

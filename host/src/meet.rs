@@ -4,8 +4,9 @@
 // characters, and its own 8 random bytes, its id, to the port of requests; the relay answers with a port nobody holds, given
 // to that id - and shows the line to give the viewer: the relay, that port and the token. At once it knocks at that port
 // with the password and the id ( one UDP packet ) - again every 20 s, and at once after a meeting, at a new address of the relay
-// or when the port refuses - and dials it, a try of up to 10 s after another, from one source port; the relay drops those SYNs,
-// and only an address that knocked waits there. The viewer dials the same port; the relay sends its SYN on to the machine, as if
+// or when the port refuses - and dials it, a try of up to 3 s after another, from one source port, the knocks from it too; the
+// relay drops those SYNs, and only an address that knocked waits there - by that port, when the NAT of the machine keeps it: a
+// viewer behind the same NAT is never taken for the machine. The viewer dials the same port; the relay sends its SYN on to the machine, as if
 // from itself: the two meet, and the server takes the connection as if it had accepted it. The machine goes on waiting at the
 // same port, from a new source port: a viewer that lost its connection, another viewer, or the machine started again as
 // administrator meets there again. The port is given to the id, not to an address: a NAT that gives the machine another address,
@@ -29,8 +30,8 @@ use socket2::{Domain, Protocol, Socket, Type};
 use crate::lib::network::TCP::Server;
 
 /// How long one try of dialing waits: the relay drops its SYN until the viewer comes, the system sends it again within the try -
-/// the relay keeps the side that waits 15 s after its last SYN.
-const TRY: Duration = Duration::from_secs(10);
+/// the relay notes where the side that waits is for 5 s, and each try notes it anew.
+const TRY: Duration = Duration::from_secs(3);
 
 /// A try refused, or the network down: the next one no sooner than this after the last began - a pause, not a storm of tries.
 const PAUSE: Duration = Duration::from_secs(2);
@@ -273,7 +274,8 @@ struct Place {
 /// one -, `show` told the relay and the port, again when they change, and from then on each connection that meets goes to
 /// `took`, the next awaited at once.
 fn run(meet: Meet, given: Option<(u16, [u8; 8])>, mut show: impl FnMut(&str, u16), mut took: impl FnMut(TcpStream, SocketAddrV4)) {
-    // one socket for the request, the reads and the knocks, from one source port: the NAT of the machine keeps one mapping for them
+    // one socket for the request and the reads, from one source port: the NAT of the machine keeps one mapping for them. The knocks
+    // go from the source port of the dialing: see `pick`
     let udp = match UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)) {
         Ok(udp) => udp,
         Err(e) => return say!("❌", Bad, "The meeting: {e}"),
@@ -308,8 +310,10 @@ fn run(meet: Meet, given: Option<(u16, [u8; 8])>, mut show: impl FnMut(&str, u16
     show(&place.name, port);
     say!("👀", Wait, "Waiting for whoever connects…");
     crate::console::stay_awake();
-    // the source port of the dialing: kept till someone comes - a relay that moves too knows the machine by it
+    // the source port of the dialing: kept till someone comes - a relay that moves too knows the machine by it -, and the socket
+    // of the knocks, bound to its number
     let mut from = SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0));
+    let mut knocker: Option<UdpSocket> = None;
     // the port of meeting is not sure at the address of now: asked again at the next look
     let mut unsure = false;
     let mut look = Instant::now() + LOOK;
@@ -317,10 +321,10 @@ fn run(meet: Meet, given: Option<(u16, [u8; 8])>, mut show: impl FnMut(&str, u16
     let mut knocked: Option<Instant> = None;
     loop {
         let at = SocketAddrV4::new(place.ip, port);
-        match once(&udp, at, &knock, &mut from, &mut knocked, look) {
+        match once(&mut knocker, at, &knock, &mut from, &mut knocked, look) {
             Ok(Some(stream)) => {
                 took(stream, at);
-                from = SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0));
+                knocker = None; // the next wait from a new source port: this one is the connection's now
                 continue;
             }
             Ok(None) => {}
@@ -375,20 +379,28 @@ fn run(meet: Meet, given: Option<(u16, [u8; 8])>, mut show: impl FnMut(&str, u16
 }
 
 /// Knocks at `at` and dials it until the viewer comes or `until` - from one source port, `from`, kept for the next call, so the NAT
-/// of the machine keeps one mapping. The knock goes when `knocked` - when it went last, kept for the next call - is `KNOCK` ago or
-/// None: None again once a try met - the meeting closed the port - or was refused. None - nobody came by `until`.
-fn once(udp: &UdpSocket, at: SocketAddrV4, knock: &[u8], from: &mut SocketAddr, knocked: &mut Option<Instant>, until: Instant) -> io::Result<Option<TcpStream>> {
+/// of the machine keeps one mapping; the knocks from `knocker`, bound to its number - None: a new port for both. The knock goes
+/// when `knocked` - when it went last, kept for the next call - is `KNOCK` ago or None: None again once a try met - the meeting
+/// closed the port - or was refused. None - nobody came by `until`.
+fn once(knocker: &mut Option<UdpSocket>, at: SocketAddrV4, knock: &[u8], from: &mut SocketAddr, knocked: &mut Option<Instant>, until: Instant) -> io::Result<Option<TcpStream>> {
     let to = SocketAddr::V4(at).into();
     while Instant::now() < until {
+        if knocker.is_none() {
+            let (udp, port) = pick()?;
+            *from = port;
+            *knocked = None;
+            *knocker = Some(udp);
+        }
+        let udp = knocker.as_ref().expect("bound just now");
         if knocked.is_none_or(|k| k.elapsed() >= KNOCK) {
             let _ = udp.send_to(knock, at); // a lost knock shows as a refused try below
             *knocked = Some(Instant::now());
         }
         let tcp = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
         tcp.set_reuse_address(true)?;
-        tcp.bind(&(*from).into())?;
-        if from.port() == 0 {
-            *from = tcp.local_addr()?.as_socket().ok_or_else(|| io::Error::other("no local address"))?;
+        if tcp.bind(&(*from).into()).is_err() {
+            *knocker = None; // taken for TCP meanwhile: another port for both
+            continue;
         }
         let started = Instant::now();
         match tcp.connect_timeout(&to, until.saturating_duration_since(started).clamp(Duration::from_secs(1), TRY)) {
@@ -397,6 +409,18 @@ fn once(udp: &UdpSocket, at: SocketAddrV4, knock: &[u8], from: &mut SocketAddr, 
                 return Ok(Some(tcp.into()));
             }
             Err(e) => {
+                // a meeting that came at the end of the try is under way - the SYN of the viewer here, its answer not yet back -:
+                // dropped now, it would end the connection the viewer already has. It is given the time to come
+                if e.kind() == io::ErrorKind::TimedOut && meeting(&tcp) {
+                    let until = Instant::now() + Duration::from_secs(2);
+                    while tcp.peer_addr().is_err() && Instant::now() < until {
+                        thread::sleep(Duration::from_millis(20));
+                    }
+                    if tcp.peer_addr().is_ok() {
+                        *knocked = None;
+                        return Ok(Some(tcp.into()));
+                    }
+                }
                 // refused: the port is not open - the knock was lost, or came late -: knocked again at once
                 if e.kind() != io::ErrorKind::TimedOut {
                     *knocked = None;
@@ -409,6 +433,68 @@ fn once(udp: &UdpSocket, at: SocketAddrV4, knock: &[u8], from: &mut SocketAddr, 
         }
     }
     Ok(None)
+}
+
+/// The dialing has met someone and is finishing it: the state of the socket in the system is SYN received or established. Linux and
+/// Android: `TCP_INFO`, its first byte; macOS: `TCP_CONNECTION_INFO`, its first byte; Windows: `SIO_TCP_INFO`, the state first.
+/// Elsewhere, or when the system says nothing - false.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn meeting(s: &Socket) -> bool {
+    use std::os::fd::AsRawFd;
+    let mut info = [0u8; 256];
+    let mut len = info.len() as libc::socklen_t;
+    let r = unsafe { libc::getsockopt(s.as_raw_fd(), libc::IPPROTO_TCP, libc::TCP_INFO, info.as_mut_ptr().cast(), &mut len) };
+    r == 0 && 0 < len && matches!(info[0], 1 | 3) // ESTABLISHED, SYN_RECV
+}
+
+#[cfg(target_os = "macos")]
+fn meeting(s: &Socket) -> bool {
+    use std::os::fd::AsRawFd;
+    let mut info = [0u8; 256];
+    let mut len = info.len() as libc::socklen_t;
+    let r = unsafe { libc::getsockopt(s.as_raw_fd(), libc::IPPROTO_TCP, 0x106 /* TCP_CONNECTION_INFO */, info.as_mut_ptr().cast(), &mut len) };
+    r == 0 && 0 < len && matches!(info[0], 3 | 4) // TCPS_SYN_RECEIVED, TCPS_ESTABLISHED
+}
+
+#[cfg(windows)]
+fn meeting(s: &Socket) -> bool {
+    use std::os::windows::io::AsRawSocket;
+    use windows::Win32::Networking::WinSock::{WSAIoctl, SOCKET};
+    let version = 0u32;
+    let mut info = [0u32; 64];
+    let mut got = 0u32;
+    let r = unsafe {
+        WSAIoctl(
+            SOCKET(s.as_raw_socket() as usize),
+            0xD800_0027, // SIO_TCP_INFO
+            Some(&version as *const u32 as *const _),
+            4,
+            Some(info.as_mut_ptr() as *mut _),
+            256,
+            &mut got,
+            None,
+            None,
+        )
+    };
+    r == 0 && 4 <= got && matches!(info[0], 3 | 4) // SYN_RCVD, ESTABLISHED
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos", windows)))]
+fn meeting(_: &Socket) -> bool { false }
+
+/// A source port for the knocks and the dialing both: free for UDP - the socket of the knocks bound to it - and for TCP. The relay
+/// sees one port in both when the NAT keeps it, and knows the side that waits by it.
+fn pick() -> io::Result<(UdpSocket, SocketAddr)> {
+    for _ in 0..20 {
+        let udp = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;
+        let from = udp.local_addr()?;
+        let tcp = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
+        tcp.set_reuse_address(true)?;
+        if tcp.bind(&from.into()).is_ok() {
+            return Ok((udp, from));
+        }
+    }
+    Err(io::Error::other("no source port free for UDP and TCP both"))
 }
 
 fn ipv4(host: &str) -> io::Result<Ipv4Addr> {
