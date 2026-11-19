@@ -1,0 +1,371 @@
+// The start of the program by a double click: no arguments, a window of its own. The user of the machine is asked how the viewer
+// will reach it - a number to press, the key alone, never an option to type - and the answer becomes the arguments a start from a
+// console takes, so all that follows is the same. The answer is kept beside the program ( adhoc-remotedesk.settings ): the next start offers
+// it on Enter.
+//
+// Typed is only what cannot be chosen: the relay, one line with its password and port, the first time. Started with arguments, or without a
+// console to ask in ( a service, a script ), the program does as it is told and asks nothing. On a phone the app is the menu
+// ( `given` ): the questions below are of a computer only.
+#![cfg_attr(target_os = "android", allow(dead_code, unused_imports))]
+
+use crate::console::paint;
+use crossterm::style::Color;
+use std::io::{self, BufRead, IsTerminal, Write};
+use std::path::PathBuf;
+use std::sync::OnceLock;
+use std::thread::{self, ThreadId};
+
+/// How the viewer reaches the machine: the ways of the README.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Way {
+    /// ① in this network
+    Here,
+    /// ② from the internet: the machine or its router has a public address
+    Internet,
+    /// ③ through a relay of AdHoc Relay
+    Meet,
+    /// ④ straight, nothing set up
+    Direct,
+}
+
+/// The way chosen in the menu; None - started with arguments.
+static CHOSEN: OnceLock<Way> = OnceLock::new();
+
+/// The thread the menu asked on: a failure there leaves the window open until Enter, so the user reads why.
+static ASKED_ON: OnceLock<ThreadId> = OnceLock::new();
+
+pub fn chosen() -> Option<Way> { CHOSEN.get().copied() }
+
+/// The way and the arguments the app of a phone made of what its user chose there: it is the menu of a phone.
+#[cfg(target_os = "android")]
+static GIVEN: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(target_os = "android")]
+pub fn given(way: Way, args: Vec<String>) {
+    let _ = CHOSEN.set(way);
+    *GIVEN.lock().unwrap() = args;
+}
+
+/// The arguments the app of a phone gave.
+#[cfg(target_os = "android")]
+pub fn arguments() -> Vec<String> { std::mem::take(&mut *GIVEN.lock().unwrap()) }
+
+/// The arguments of the program: as given; or, started by a double click, what the menu makes of the answer.
+#[cfg(not(target_os = "android"))]
+pub fn arguments() -> Vec<String> {
+    crate::console::banner();
+    let given: Vec<String> = std::env::args().skip(1).collect();
+    if !given.is_empty() || !io::stdin().is_terminal() {
+        return given;
+    }
+    let _ = ASKED_ON.set(thread::current().id());
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        default_hook(info);
+        if ASKED_ON.get() == Some(&thread::current().id()) {
+            wait_to_close();
+        }
+    }));
+    let (way, args) = ask(&mut io::stdin().lock(), true, &Kept::file());
+    let _ = CHOSEN.set(way);
+    args
+}
+
+/// What the user of a window opened by a double click needs before it closes: the time to read it.
+pub fn wait_to_close() {
+    if CHOSEN.get().is_none() {
+        return;
+    }
+    print!("\n {}", paint("Press Enter to close this window.", Color::Cyan, false));
+    let _ = io::stdout().flush();
+    let _ = io::stdin().lock().read_line(&mut String::new());
+    std::process::exit(1);
+}
+
+/// The ways as the menu shows them: the sign, the name, a word on when.
+const WAYS: [(&str, &str, &str); 4] = [
+    ("🏠", "From this network", "the same home or office"),
+    ("🌍", "From the internet", "this computer or its router has a public address"),
+    ("🤝", "Relay", "AdHoc Relay on a router of yours"),
+    ("⚡", "Directly", "nothing to set up"),
+];
+
+/// What the relay of way 3 is a relay to, as the menu offers it: the sign, the name, a word on it.
+const RELAYS: [(&str, &str, &str); 3] = [
+    ("🖥️", "AdHoc RemoteDesk", "the page of AdHoc RemoteDesk, as on the other ways"),
+    ("🪟", "Remote Desktop of Windows", "Remote Desktop Connection ( mstsc ): a long, strong password on the account is a must"),
+    ("🔌", "Another port", "of this computer or of its network: you type which"),
+];
+
+/// The questions, answered from `input` - the keys of the console, when `keys`; what is kept, in `file`. The way chosen, and the
+/// arguments it makes.
+fn ask(input: &mut dyn BufRead, keys: bool, file: &std::path::Path) -> (Way, Vec<String>) {
+    let mut kept = Kept::load(file);
+    say!("🧭", News, "How will the viewer reach this computer?");
+    println!();
+    for (i, (sign, name, when)) in WAYS.iter().enumerate() {
+        let when = match (i, &kept.meet) {
+            (2, Some(m)) => format!("AdHoc Relay: {}", crate::meet::pretty(m)),
+            _ => when.to_string(),
+        };
+        println!("    {}  {sign}  {}{}", paint(i + 1, Color::Yellow, true), paint(format!("{name:<20}"), Color::White, true), paint(when, Color::DarkGrey, false));
+    }
+    println!();
+    let last = kept.way;
+    print!(" {} ", match last {
+        Some(w) => paint(format!("Press 1, 2, 3 or 4 · Enter: {} as last time ›", w as u8 + 1), Color::Cyan, false),
+        None => paint("Press 1, 2, 3 or 4 ›", Color::Cyan, false),
+    });
+    // the key is the answer: nothing to press after it
+    let way = loop {
+        match press(input, keys) {
+            None => std::process::exit(0),
+            Some('1') => break Way::Here,
+            Some('2') => break Way::Internet,
+            Some('3') => break Way::Meet,
+            Some('4') => break Way::Direct,
+            Some('\n') if last.is_some() => break last.unwrap(),
+            _ => {}
+        }
+    };
+    let (sign, name, _) = WAYS[way as usize];
+    println!("{}", paint(format!("{}  {sign} {name}", way as u8 + 1), Color::Green, true));
+    let mut args = Vec::new();
+    match way {
+        Way::Here | Way::Internet => {}
+        Way::Direct => args.push(String::from("--direct")),
+        Way::Meet => {
+            // what the relay is a relay to: AdHoc RemoteDesk, Remote Desktop of Windows, or a port typed
+            say!("🤝", News, "Use AdHoc Relay as the way to:");
+            for (i, (sign, name, about)) in RELAYS.iter().enumerate() {
+                println!("    {}  {sign}  {}{}", paint(i + 1, Color::Yellow, true), paint(format!("{name:<27}"), Color::White, true), paint(about, Color::DarkGrey, false));
+            }
+            let last = kept.relay;
+            print!(" {} ", match last {
+                Some(r) => paint(format!("Press 1, 2 or 3 · Enter: {} as last time ›", r + 1), Color::Cyan, false),
+                None => paint("Press 1, 2 or 3 ›", Color::Cyan, false),
+            });
+            let relay = loop {
+                match press(input, keys) {
+                    None => std::process::exit(0),
+                    Some(c @ '1'..='3') => break c as u8 - b'1',
+                    Some('\n') if last.is_some() => break last.unwrap(),
+                    _ => {}
+                }
+            };
+            let (sign, name, _) = RELAYS[relay as usize];
+            println!("{}", paint(format!("{}  {sign} {name}", relay + 1), Color::Green, true));
+            let mut line = |prompt: &str| line(input, prompt);
+            let forward = match relay {
+                0 => None,
+                1 => Some(format!("127.0.0.1:{}", crate::meet::MSTSC)),
+                _ => Some(loop {
+                    let typed = match &kept.forward {
+                        Some(f) => line(&format!("Which port: of this computer, such as 22, or address:port of its network - Enter for {f}: ")),
+                        None => line("Which port: of this computer, such as 22, or address:port of its network: "),
+                    };
+                    let typed = if typed.is_empty() { kept.forward.clone().unwrap_or_default() } else { typed };
+                    if let Some(to) = target(&typed) {
+                        break to;
+                    }
+                    say!("💡", Warn, "A port, such as 22 or 5900, or an address and a port, such as 192.168.1.5:80");
+                }),
+            };
+            say!("💤", Warn, "To connect later, this computer must stay on and awake: asleep, it lets nobody in");
+            // the point and its password, or the key of its fixed port, as its owner gave them - in one line, as the page of AdHoc Relay
+            // copies it, or apart: kept, offered on Enter. The point is kept without the password, from the first 👉 or 🌐 on, with its
+            // emoji, as it is shown: 👉 last when a port is asked for, none for a fixed port; in memory and in the arguments in the signs
+            // of the keyboard - 👉 >, 🌐 @
+            let (point, fixed, with) = loop {
+                let typed = match &kept.meet {
+                    Some(m) => line(&format!("The relay - Enter for {}: ", crate::meet::pretty(m))),
+                    None => line("The relay, as its owner gave it: "),
+                };
+                let typed = if typed.is_empty() { kept.meet.clone().unwrap_or_default() } else { typed };
+                let (with, point) = crate::meet::Meet::given(&typed);
+                if let Ok((fixed, _)) = crate::meet::Meet::place(&point) {
+                    break (point, fixed, with.filter(|p| crate::meet::Meet::of(p, "router").is_ok()));
+                }
+                say!("💡", Warn, "As its owner gave it - such as Tr7kQ2xZp4Lm9sWd👉router.example.org:40000👉, Fx2pL8wNq7Rk3mZa👉router.example.org:41000 for a fixed port, or Tr7kQ2xZp4Lm9sWd🌐Rk8mP2qLx3Vb7NtY👉198.51.100.9:40000🌐40000👉 for a relay whose address is read there - or a name or an address, and :port when its owner gave one");
+            };
+            let what = if fixed { "The key of its fixed port" } else { "Its password" };
+            let same_point = kept.meet.as_deref() == Some(point.as_str());
+            let password = if let Some(p) = with { p } else { loop {
+                let typed = match (&kept.meet_password, same_point) {
+                    (Some(_), true) => line(&format!("{what}, 16 characters - Enter for the same as last time: ")),
+                    _ => line(&format!("{what}, 16 characters: ")),
+                };
+                let password = if typed.is_empty() && same_point { kept.meet_password.clone().unwrap_or_default() } else { typed };
+                if crate::meet::Meet::of(&password, &point).is_ok() {
+                    break password;
+                }
+                say!("💡", Warn, "{what} is 16 letters and digits, as the owner of the relay gave it");
+            } };
+            args.extend([String::from("--meet"), point.clone(), String::from("--meet-password"), password.clone()]);
+            if let Some(to) = &forward {
+                args.extend([String::from("--forward"), to.clone()]);
+            }
+            kept.meet = Some(point);
+            kept.meet_password = Some(password);
+            kept.relay = Some(relay);
+            if relay == 2 {
+                kept.forward = forward;
+            }
+        }
+    }
+    kept.way = Some(way);
+    kept.save(file);
+    println!();
+    (way, args)
+}
+
+/// Where a relay goes, of what the user typed: a port alone - of this computer -, or address:port. None - neither.
+fn target(typed: &str) -> Option<String> {
+    let typed = typed.trim();
+    if let Ok(port) = typed.parse::<u16>() {
+        return (port != 0).then(|| format!("127.0.0.1:{port}"));
+    }
+    let (host, port) = typed.rsplit_once(':')?;
+    (!host.is_empty() && !host.contains(' ') && port.parse::<u16>().is_ok_and(|p| p != 0)).then(|| typed.to_string())
+}
+
+/// The key pressed: of the console, when `keys`; else the next character of `input` ( '\n' - Enter ). None - the input is over.
+fn press(input: &mut dyn BufRead, keys: bool) -> Option<char> {
+    if keys {
+        return crate::console::key();
+    }
+    let mut b = [0u8];
+    loop {
+        if input.read(&mut b).ok()? == 0 {
+            return None;
+        }
+        if b[0] != b'\r' {
+            return Some(b[0] as char);
+        }
+    }
+}
+
+/// A line the user typed, trimmed; the end of the input - the window is closing.
+fn line(input: &mut dyn BufRead, prompt: &str) -> String {
+    print!(" {} ", paint(prompt, Color::Cyan, false));
+    let _ = io::stdout().flush();
+    let mut s = String::new();
+    if input.read_line(&mut s).unwrap_or(0) == 0 {
+        std::process::exit(0);
+    }
+    s.trim().to_string()
+}
+
+/// What the menu keeps beside the program: the last way, the relay and its password, what it is a relay to and the port
+/// typed for it. Lines `key = value`.
+struct Kept {
+    way:           Option<Way>,
+    meet:          Option<String>,
+    meet_password: Option<String>,
+    /// 0 - AdHoc RemoteDesk, 1 - Remote Desktop of Windows, 2 - the port typed
+    relay:         Option<u8>,
+    forward:       Option<String>,
+}
+
+impl Kept {
+    fn file() -> PathBuf {
+        std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join("adhoc-remotedesk.settings"))).unwrap_or_else(|| PathBuf::from("adhoc-remotedesk.settings"))
+    }
+
+    fn load(file: &std::path::Path) -> Self {
+        let mut kept = Kept { way: None, meet: None, meet_password: None, relay: None, forward: None };
+        for l in std::fs::read_to_string(file).unwrap_or_default().lines() {
+            let Some((k, v)) = l.split_once('=') else { continue };
+            let v = v.trim().to_string();
+            match k.trim() {
+                "way" => kept.way = [Way::Here, Way::Internet, Way::Meet, Way::Direct].get(v.parse::<usize>().unwrap_or(0).wrapping_sub(1)).copied(),
+                "meet" if !v.is_empty() => kept.meet = Some(crate::meet::plain(&v)),
+                "meet_password" if !v.is_empty() => kept.meet_password = Some(v),
+                "relay" => kept.relay = v.parse::<u8>().ok().filter(|r| (1..=3).contains(r)).map(|r| r - 1),
+                "forward" if !v.is_empty() => kept.forward = Some(v),
+                _ => {}
+            }
+        }
+        kept
+    }
+
+    fn save(&self, file: &std::path::Path) {
+        let mut s = String::from("# AdHoc RemoteDesk: what the window of the program offers on Enter\n");
+        if let Some(w) = self.way {
+            s += &format!("way = {}\n", w as u8 + 1);
+        }
+        // kept as it is shown: the emoji
+        if let Some(m) = &self.meet {
+            s += &format!("meet = {}\n", crate::meet::pretty(m));
+        }
+        if let Some(p) = &self.meet_password {
+            s += &format!("meet_password = {p}\n");
+        }
+        if let Some(r) = self.relay {
+            s += &format!("relay = {}\n", r + 1);
+        }
+        if let Some(f) = &self.forward {
+            s += &format!("forward = {f}\n");
+        }
+        if let Err(e) = std::fs::write(file, s) {
+            say!("💾", Quiet, "Not kept for the next start: {e}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run(answers: &str, file: &std::path::Path) -> (Way, Vec<String>) { ask(&mut io::Cursor::new(answers.as_bytes().to_vec()), false, file) }
+
+    #[test]
+    fn the_menu_asks_and_keeps() {
+        let file = std::env::temp_dir().join(format!("adhoc-remotedesk-menu-{}.settings", std::process::id()));
+        let _ = std::fs::remove_file(&file);
+
+        // the first start: Enter is no answer yet, 7 is none; the key 4 - directly, nothing after it
+        assert_eq!(run("\n74", &file), (Way::Direct, vec![String::from("--direct")]));
+        // the next one: Enter - as last time
+        assert_eq!(run("\n", &file), (Way::Direct, vec![String::from("--direct")]));
+        // a relay: a wrong one, then the right one; a short password, then the right one
+        assert_eq!(
+            run("31router:abc\nrouter.example.org:40000\nTr7kQ2xZ\nTr7kQ2xZp4Lm9sWd\n", &file),
+            (Way::Meet, ["--meet", "router.example.org:40000", "--meet-password", "Tr7kQ2xZp4Lm9sWd"].map(String::from).to_vec())
+        );
+        // kept: Enter, Enter, Enter, Enter - the same way, relay, point and password
+        assert_eq!(run("\n\n\n\n", &file).1, ["--meet", "router.example.org:40000", "--meet-password", "Tr7kQ2xZp4Lm9sWd"].map(String::from).to_vec());
+        // another point: its password is asked anew
+        assert_eq!(run("3\nother.example.org:41000\n\nAb12Cd34Ef56Gh78\n", &file).1, ["--meet", "other.example.org:41000", "--meet-password", "Ab12Cd34Ef56Gh78"].map(String::from).to_vec());
+        // one line, as the page of AdHoc Relay copies it: no password asked; kept apart, the point without it - in the arguments in the signs of the keyboard, in the file with its emoji
+        assert_eq!(run("31Yk0n6jLeQ2wE4rT6👉unirail.org👉\n", &file).1, ["--meet", ">unirail.org>", "--meet-password", "Yk0n6jLeQ2wE4rT6"].map(String::from).to_vec());
+        assert_eq!(run("31Ab12Cd34Ef56Gh78👉other.example.org:41000👉\n", &file).1, ["--meet", ">other.example.org:41000>", "--meet-password", "Ab12Cd34Ef56Gh78"].map(String::from).to_vec());
+        assert!(std::fs::read_to_string(&file).unwrap().contains("meet = 👉other.example.org:41000👉\n"));
+        assert_eq!(run("\n\n\n\n", &file).1, ["--meet", ">other.example.org:41000>", "--meet-password", "Ab12Cd34Ef56Gh78"].map(String::from).to_vec());
+        // a wrong line is no line, nor the line of the old form: said, and the next one taken
+        assert_eq!(run("31Ab12Cd34Ef56Gh78@other.example.org:41000\nAb12Cd34Ef56Gh78👉👀Rk8mP2qLx3Vb7NtY👉198.51.100.9:40000:40000👉\nAb12Cd34Ef56Gh78>other.example.org:41000>\n", &file).1, ["--meet", ">other.example.org:41000>", "--meet-password", "Ab12Cd34Ef56Gh78"].map(String::from).to_vec());
+        // a fixed port - no 👉 at the end -, and an address read where the record of the relay is kept
+        assert_eq!(run("31Fx2pL8wNq7Rk3mZa👉other.example.org:41000\n", &file).1, ["--meet", ">other.example.org:41000", "--meet-password", "Fx2pL8wNq7Rk3mZa"].map(String::from).to_vec());
+        assert_eq!(run("\n\n\n\n", &file).1, ["--meet", ">other.example.org:41000", "--meet-password", "Fx2pL8wNq7Rk3mZa"].map(String::from).to_vec());
+        assert_eq!(
+            run("31Ab12Cd34Ef56Gh78🌐Rk8mP2qLx3Vb7NtY👉198.51.100.9:40000🌐Hx4nT7wAe2Kq9VsM👉s2.example.org:40000🌐40000👉\n", &file).1,
+            ["--meet", "@Rk8mP2qLx3Vb7NtY>198.51.100.9:40000@Hx4nT7wAe2Kq9VsM>s2.example.org:40000@40000>", "--meet-password", "Ab12Cd34Ef56Gh78"].map(String::from).to_vec()
+        );
+        assert!(std::fs::read_to_string(&file).unwrap().contains("meet = 🌐Rk8mP2qLx3Vb7NtY👉198.51.100.9:40000🌐Hx4nT7wAe2Kq9VsM👉s2.example.org:40000🌐40000👉\n"));
+        assert_eq!(run("\n\n\n\n", &file).1, ["--meet", "@Rk8mP2qLx3Vb7NtY>198.51.100.9:40000@Hx4nT7wAe2Kq9VsM>s2.example.org:40000@40000>", "--meet-password", "Ab12Cd34Ef56Gh78"].map(String::from).to_vec());
+        // the point apart, the key of its fixed port typed after it - the signs of the keyboard as good as the emoji
+        assert_eq!(run("31>other.example.org:41000\nFx2pL8wNq7Rk3mZa\n", &file).1, ["--meet", ">other.example.org:41000", "--meet-password", "Fx2pL8wNq7Rk3mZa"].map(String::from).to_vec());
+        assert_eq!(run("31Ab12Cd34Ef56Gh78>other.example.org:41000>\n", &file).1, ["--meet", ">other.example.org:41000>", "--meet-password", "Ab12Cd34Ef56Gh78"].map(String::from).to_vec());
+        // a relay to Remote Desktop of Windows: its port, nothing typed
+        assert_eq!(run("32\n\n", &file).1, ["--meet", ">other.example.org:41000>", "--meet-password", "Ab12Cd34Ef56Gh78", "--forward", "127.0.0.1:3389"].map(String::from).to_vec());
+        // a relay to a port typed: a wrong one, then a port of this computer; then another of its network; Enter - the same
+        assert_eq!(run("33x\n22\n\n\n", &file).1, ["--meet", ">other.example.org:41000>", "--meet-password", "Ab12Cd34Ef56Gh78", "--forward", "127.0.0.1:22"].map(String::from).to_vec());
+        assert_eq!(run("3\n192.168.1.5:5900\n\n\n", &file).1, ["--meet", ">other.example.org:41000>", "--meet-password", "Ab12Cd34Ef56Gh78", "--forward", "192.168.1.5:5900"].map(String::from).to_vec());
+        assert_eq!(run("\n\n\n\n\n", &file).1, ["--meet", ">other.example.org:41000>", "--meet-password", "Ab12Cd34Ef56Gh78", "--forward", "192.168.1.5:5900"].map(String::from).to_vec());
+        // this network, and the internet: no arguments, the way tells the lines
+        assert_eq!(run("1", &file), (Way::Here, vec![]));
+        assert_eq!(run("2", &file), (Way::Internet, vec![]));
+        assert!(std::fs::read_to_string(&file).unwrap().contains("way = 2"));
+        let _ = std::fs::remove_file(&file);
+    }
+}

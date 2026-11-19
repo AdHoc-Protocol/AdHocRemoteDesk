@@ -1,0 +1,565 @@
+// The input of the page, posted to the worker of the session ( ./worker/input.ts makes the packs ): keys by their physical place
+// ( USB HID usage - the layout is the machine's ), text of input methods, the mouse in fractions of the canvas, the wheel in ticks,
+// the pointer locked in the page, touch. The pointer and the wheel go once an animation frame of the page; a key, text, a button
+// or a touch goes at once, after what the pointer did before it.
+
+import { W, Touch, type ToWorker } from "./messages";
+import { usbOf } from "./keymap";
+
+type Post = (message: ToWorker, transfer?: Transferable[]) => void;
+
+const mac = /Mac|iPhone|iPad/.test(navigator.platform);
+const clamp = (v: number) => Math.max(-32768, Math.min(32767, Math.round(v)));
+/** `v` of `size` as 0 … 65535. */
+const fraction = (v: number, size: number) => Math.round(Math.min(1, Math.max(0, v / size)) * 65535);
+
+export interface Input {
+    lockPointer(): void;
+    /** The keys of the page come to this desk now. */
+    focus(): void;
+    /** The keyboard on the screen of the device shown, or hidden: `on`, else the other way; what it is now. */
+    keyboard(on?: boolean): boolean;
+    /** Told when the keyboard on the screen goes or comes by itself: the Back of a phone closed it. */
+    keyboardChanged: (on: boolean) => void;
+    /** Where a finger touched the canvas last, on the page: the field the keyboard is to type into. */
+    touchedAt(): { x: number; y: number } | undefined;
+    /** The desk went into another window: its keys leave the window it left. */
+    moved(): void;
+    stop(): void;
+}
+
+/**
+ * `frameWidth` - the width of the frames, pixels of the machine: what a pixel of the page is on the machine; `layer` - the element the desk
+ * is in ( full screen shows only it ): the field the keys come to is there.
+ */
+export function start(canvas: HTMLCanvasElement, layer: HTMLElement, frameWidth: () => number, post: Post,
+    pinch: (phase: "start" | "move" | "end", ratio: number, x: number, y: number) => void = () => undefined,
+    zoomed: () => boolean = () => false, phone = false): Input {
+    // the keys come to an invisible field over the canvas: input methods and soft keyboards type into a field
+    const field = document.createElement("textarea");
+    /** The window the desk is in: the page's, or one of its own ( src/app.ts ). */
+    const view = () => canvas.ownerDocument.defaultView ?? window;
+    field.setAttribute("autocapitalize", "off");
+    field.setAttribute("autocomplete", "off");
+    field.spellcheck = false;
+    field.style.cssText = "position:fixed;left:0;top:0;width:1px;height:1px;opacity:0;border:0;padding:0;resize:none;z-index:-1";
+    // A finger on the canvas focuses the field, as a click does: the keys of a keyboard of the device come to it. The keyboard on
+    // the screen would come up at each touch - so it does not ( inputmode none ), till its button in the bar asks it
+    let keyboardOn = false;
+    /** Where a finger touched the canvas last. */
+    let touched: { x: number; y: number } | undefined;
+    const touchScreen = view().matchMedia("(pointer: coarse)").matches;
+    field.inputMode = touchScreen ? "none" : "";
+    layer.appendChild(field);
+    canvas.style.touchAction = "none";
+
+    const held = new Set<number>();
+    let lastEventTime = 0;
+
+    /** Before a burst of input: the machine returns it with the first frame after it. */
+    const stamp = () => {
+        const now = performance.now();
+        if (now - lastEventTime < 50) return;
+        lastEventTime = now;
+        post({ t: W.STAMP, ms: now });
+    };
+
+    // ── keys ──
+
+    const key = (usb: number, pressed: boolean, e?: KeyboardEvent) => {
+        if (frameAsked) flush(); // the pointer and the wheel first, as they came
+        if (e && pressed) {
+            if (mac) post({ t: W.KEY, usb, pressed, caps: e.getModifierState("CapsLock") });
+            else post({ t: W.KEY, usb, pressed, caps: e.getModifierState("CapsLock"), num: e.getModifierState("NumLock") });
+        } else post({ t: W.KEY, usb, pressed });
+        pressed ? held.add(usb) : held.delete(usb);
+    };
+
+    const text = (data: string) => {
+        if (!data) return;
+        stamp();
+        if (frameAsked) flush();
+        post({ t: W.TEXT, text: data });
+    };
+
+    // ── a paste: the text of this device goes first, then the keys - the machine pastes it ──
+    //
+    // Ctrl ( ⌘ ) + V and Shift + Insert are left to the browser: it pastes into the field, and its paste brings the text with no
+    // asking - reading the clipboard would ask the user. The text goes to the machine, then the key, held back till then. No paste
+    // comes ( no text on the clipboard ): the key goes in a moment anyway.
+
+    /** The key of a paste held back: the paste goes first. */
+    let pasteKey: { usb: number; e: KeyboardEvent; timer: ReturnType<typeof setTimeout> } | undefined;
+
+    const isPaste = (e: KeyboardEvent) =>
+        !e.repeat && !e.altKey && ((e.code === "KeyV" && (e.ctrlKey || e.metaKey)) || (e.code === "Insert" && e.shiftKey && !e.ctrlKey));
+
+    /** The key of the paste goes: after its text, or after waiting for one. */
+    const pasteGoes = () => {
+        if (!pasteKey) return;
+        clearTimeout(pasteKey.timer);
+        const { usb, e } = pasteKey;
+        pasteKey = undefined;
+        key(usb, true, e);
+    };
+
+    const onPaste = (e: ClipboardEvent) => {
+        e.preventDefault(); // into the field goes nothing: the text goes to the machine
+        const data = e.clipboardData?.getData("text/plain") ?? "";
+        if (data !== "") {
+            post({ t: W.CLIPBOARD, text: data.replace(/\r\n?/g, "\n") });
+            return pasteGoes();
+        }
+        // no text: a picture, made PNG - the key waits for it, so the machine pastes it, not what it had
+        const file = [...(e.clipboardData?.files ?? [])].find(f => f.type.startsWith("image/"));
+        if (!file) return pasteGoes();
+        if (pasteKey) clearTimeout(pasteKey.timer);
+        pngOf(file)
+            .then(png => { if (!stopped) post({ t: W.PICTURE, png }, [png]); })
+            .catch(e => console.warn("the picture pasted is not sent:", e))
+            .finally(pasteGoes);
+    };
+
+    /** A picture as PNG: as it is, or drawn anew. */
+    const pngOf = async (file: Blob): Promise<ArrayBuffer> => {
+        if (file.type === "image/png") return file.arrayBuffer();
+        const bitmap = await createImageBitmap(file);
+        const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+        canvas.getContext("2d")!.drawImage(bitmap, 0, 0);
+        bitmap.close();
+        return (await canvas.convertToBlob({ type: "image/png" })).arrayBuffer();
+    };
+
+    const onKeyDown = (e: KeyboardEvent) => {
+        if (e.isComposing || e.keyCode === 229) return; // an input method composes: its text comes with compositionend
+        const usb = usbOf[e.code];
+        if (usb !== undefined && isPaste(e)) {
+            stamp();
+            if (pasteKey) pasteGoes();
+            pasteKey = { usb, e, timer: setTimeout(pasteGoes, 150) };
+            return; // not prevented: the browser pastes
+        }
+        e.preventDefault();
+        stamp();
+        // a phone has no layout of keys: a character typed goes as it is; its keys of editing and shortcuts go as keys
+        if (phone && e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey) return text(e.key);
+        if (usb !== undefined) key(usb, true, e);
+        else if (e.key.length === 1) text(e.key);
+    };
+
+    const onKeyUp = (e: KeyboardEvent) => {
+        if (e.isComposing) return;
+        const usb = usbOf[e.code];
+        if (usb === undefined) return;
+        if (pasteKey?.usb === usb) pasteGoes(); // let go before the paste came: down first, then up
+        e.preventDefault();
+        if (held.has(usb)) key(usb, false);
+    };
+
+    const onComposed = (e: CompositionEvent) => {
+        text(e.data);
+        field.value = "";
+    };
+
+    /** A soft keyboard types without keys the page can name: what it typed is text. */
+    const onInput = (e: Event) => {
+        const ie = e as InputEvent;
+        if (!ie.isComposing && ie.inputType === "insertText" && ie.data) text(ie.data);
+        if (!ie.isComposing) field.value = "";
+    };
+
+    /** The page lost the focus: what it held goes up on the machine. */
+    const releaseAll = () => {
+        for (const usb of held) key(usb, false); // deleting from a Set while going over it is safe
+    };
+
+    field.addEventListener("keydown", onKeyDown);
+    field.addEventListener("paste", onPaste);
+    field.addEventListener("keyup", onKeyUp);
+    field.addEventListener("compositionend", onComposed);
+    field.addEventListener("input", onInput);
+    field.addEventListener("blur", releaseAll);
+    let blurred = view(); // the keys held go up when the window loses the focus
+    blurred.addEventListener("blur", releaseAll);
+
+    // ── the mouse and the pen ──
+
+    // what the pointer and the wheel did since the last frame of the page: posted once a frame, before any button or key; the place
+    // on the canvas is worked out then, once
+    let moved = false, pointerX = 0, pointerY = 0;
+    let deltaX = 0, deltaY = 0; // pixels of the page
+    let wheelX = 0, wheelY = 0; // 120ths of a notch: what is less than one waits for more
+    let frameAsked = false;
+    let stopped = false; // a frame asked for before the stop comes after it
+    const flush = () => {
+        frameAsked = false;
+        const wx = Math.trunc(wheelX), wy = Math.trunc(wheelY);
+        if (stopped || !moved && !deltaX && !deltaY && !wx && !wy) return;
+        let x = 0, y = 0, dx = 0, dy = 0;
+        if (moved || deltaX || deltaY) {
+            const r = canvas.getBoundingClientRect();
+            if (moved) {
+                x = fraction(pointerX - r.left, r.width);
+                y = fraction(pointerY - r.top, r.height);
+            }
+            const scale = frameWidth() / Math.max(1, r.width);
+            dx = clamp(deltaX * scale);
+            dy = clamp(deltaY * scale);
+        }
+        post({ t: W.POINTER, moved, x, y, dx, dy, wx: clamp(wx), wy: clamp(wy) });
+        moved = false;
+        deltaX = deltaY = 0;
+        wheelX -= wx;
+        wheelY -= wy;
+    };
+    const later = () => {
+        if (!frameAsked) {
+            frameAsked = true;
+            view().requestAnimationFrame(flush);
+        }
+    };
+
+    const locked = () => canvas.ownerDocument.pointerLockElement === canvas;
+
+    const button = (e: PointerEvent, down: boolean) => {
+        if (e.button < 0 || e.button > 4) return;
+        flush();
+        stamp();
+        const r = canvas.getBoundingClientRect();
+        post({ t: W.BUTTON, button: e.button, down, x: fraction(e.clientX - r.left, r.width), y: fraction(e.clientY - r.top, r.height), locked: locked() });
+    };
+
+    // ── touch ──
+
+    const touches = new Map<number, number>(); // pointerId → the id of the point on the wire
+    let used = 0; // the ids on the wire taken, a bit each
+    const touchMoved = new Map<number, PointerEvent>();
+    let touchFrame = false;
+
+    /** Adds the point of `e` to `points`: `r` - the canvas on the page, `scale` - pixels of the machine a pixel of the page. */
+    const point = (points: number[], e: PointerEvent, id: number, r: DOMRect, scale: number) => {
+        points.push(
+            id,
+            fraction(e.clientX - r.left, r.width), fraction(e.clientY - r.top, r.height),
+            Math.min(4095, Math.round(e.width / 2 * scale)), Math.min(4095, Math.round(e.height / 2 * scale)),
+            Math.round(e.twist ?? 0) % 360,
+            Math.round(e.pressure * 255),
+        );
+    };
+    const one = (e: PointerEvent, id: number) => {
+        const r = canvas.getBoundingClientRect(), points: number[] = [];
+        point(points, e, id, r, frameWidth() / Math.max(1, r.width));
+        return points;
+    };
+
+    const touchEvent = (kind: Touch, points: number[]) => {
+        if (frameAsked) flush();
+        post({ t: W.TOUCH, kind, points });
+    };
+
+    const flushTouch = () => {
+        touchFrame = false;
+        if (stopped || touchMoved.size === 0) return;
+        const r = canvas.getBoundingClientRect(), scale = frameWidth() / Math.max(1, r.width);
+        const points: number[] = [];
+        for (const e of touchMoved.values()) {
+            const id = touches.get(e.pointerId);
+            if (id !== undefined) point(points, e, id, r, scale);
+        }
+        touchMoved.clear();
+        if (points.length) touchEvent(Touch.MOVE, points);
+    };
+
+    // ── a pinch: two fingers apart or together zoom the view of the page, as AnyDesk does ──
+    //
+    // The whole screen in view: two fingers go to the machine as they are - a scroll of two fingers is the machine's - until their
+    // distance changes by more than a little: then it is a pinch. A view zoomed or 1:1: two fingers are the view's at once, as on a
+    // map - moved together they move it, and apart or together, once by more than a little, they zoom it too. What the fingers began
+    // on the machine is cancelled there, and the view of the page follows the point between them ( ./screen.ts ), till every finger
+    // is up.
+
+    /** The fingers on the canvas, where each is now. */
+    const fingers = new Map<number, { x: number; y: number }>();
+    /** The last event of each finger the machine has: a cancel tells where it was. */
+    const lastTouch = new Map<number, PointerEvent>();
+    /** Two fingers down: how far apart they were then, the point between them. */
+    let pinchStart: { d: number; x: number; y: number } | undefined;
+    let pinching = false;
+    /** The distance the zoom of a pinch goes from; `undefined` - the fingers move the view only, not apart or together enough yet. */
+    let scaleFrom: number | undefined;
+    /** By how much the distance of two fingers changes before they zoom: less is the shake of a hand. */
+    const enough = (d: number, from: number) => Math.abs(d - from) > Math.max(24, from * 0.15);
+    /** The ratio of the zoom now: 1 till the fingers went apart or together enough, from then on from where they were. */
+    const ratio = (d: number) => {
+        if (scaleFrom === undefined && enough(d, pinchStart!.d)) scaleFrom = d;
+        return scaleFrom === undefined ? 1 : d / scaleFrom;
+    };
+
+    const spread = () => {
+        const [a, b] = [...fingers.values()] as [{ x: number; y: number }, { x: number; y: number }];
+        return { d: Math.hypot(a.x - b.x, a.y - b.y), x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+    };
+
+    /** The fingers became a pinch: what they began on the machine is cancelled there. */
+    const pinchBegins = () => {
+        stopHolding();
+        flushTouch();
+        for (const [pointerId, id] of touches) {
+            const e = lastTouch.get(pointerId);
+            if (e) touchEvent(Touch.CANCEL, one(e, id));
+        }
+        touches.clear();
+        touchMoved.clear();
+        used = 0;
+        pinching = true;
+        pinch("start", 1, pinchStart!.x, pinchStart!.y);
+    };
+
+    // ── a tap, then at once a hold at the same place: the right button there - the menu of what the tap chose ──
+    //
+    // A long press of a finger is not the right button for every system, nor every app: this is a gesture of the page. The tap goes
+    // to the machine as it is - it chooses; the touch after it goes as well, as a touch, till it holds still long enough: then it
+    // is cancelled there, and the right button is pressed and let go at its place. A double tap stays a double tap, a tap and a
+    // drag a drag.
+
+    /** A tap is shorter; the touch after it comes sooner and nearer; it holds that long, moving less. */
+    const TAP = 250, AGAIN = 400, NEAR = 30, HOLD = 500, STILL = 12;
+    /** Where each finger came down, and when. */
+    const downs = new Map<number, { x: number; y: number; at: number }>();
+    /** The last tap: where and when it went up. */
+    let tapped: { x: number; y: number; at: number } | undefined;
+    /** The finger that may become the right button, and the timer that makes it so. */
+    let holding: { pointerId: number; timer: number } | undefined;
+    /** The fingers that became the right button: what they do after is nobody's. */
+    const asButton = new Set<number>();
+    const far = (a: { x: number; y: number }, x: number, y: number, d: number) => Math.hypot(a.x - x, a.y - y) > d;
+    const stopHolding = () => {
+        if (holding) view().clearTimeout(holding.timer);
+        holding = undefined;
+    };
+    const rightButton = (pointerId: number) => {
+        holding = undefined;
+        const e = lastTouch.get(pointerId), id = touches.get(pointerId);
+        if (!e || id === undefined || fingers.size !== 1) return;
+        flushTouch();
+        touchEvent(Touch.CANCEL, one(e, id));
+        touches.delete(pointerId);
+        used &= ~(1 << id);
+        asButton.add(pointerId);
+        tapped = undefined;
+        flush();
+        stamp();
+        const r = canvas.getBoundingClientRect(), x = fraction(e.clientX - r.left, r.width), y = fraction(e.clientY - r.top, r.height);
+        post({ t: W.BUTTON, button: 2, down: true, x, y, locked: false });
+        post({ t: W.BUTTON, button: 2, down: false, x, y, locked: false });
+    };
+
+    // ── the events of the canvas ──
+
+    const onPointerDown = (e: PointerEvent) => {
+        e.preventDefault();
+        if (e.pointerType === "touch") {
+            if (!keyboardOn) field.inputMode = "none";
+            touched = { x: e.clientX, y: e.clientY };
+        }
+        field.focus({ preventScroll: true });
+        canvas.setPointerCapture(e.pointerId);
+        if (e.pointerType === "touch") {
+            fingers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+            downs.set(e.pointerId, { x: e.clientX, y: e.clientY, at: e.timeStamp });
+            pinchStart = undefined;
+            if (fingers.size > 1) stopHolding(); // two fingers: no right button of a tap and a hold
+            if (fingers.size === 2) {
+                const s = spread();
+                pinchStart = { d: Math.max(1, s.d), x: s.x, y: s.y };
+                // a view zoomed: the two fingers are the view's at once, they move it; the zoom waits for them to go apart or together
+                if (!pinching && zoomed()) {
+                    scaleFrom = undefined;
+                    return pinchBegins();
+                }
+            }
+            if (pinching) return; // a finger more in a pinch: the view's, not the machine's
+            lastTouch.set(e.pointerId, e);
+            const free = ~used & (used + 1); // the lowest free one, its bit
+            const id = free === 0 ? 31 : 31 - Math.clz32(free);
+            used |= 1 << id;
+            touches.set(e.pointerId, id);
+            stamp();
+            touchEvent(Touch.START, one(e, id));
+            // a touch right after a tap, where it was: if it holds still, it is the right button
+            if (fingers.size === 1 && tapped && e.timeStamp - tapped.at < AGAIN && !far(tapped, e.clientX, e.clientY, NEAR)) {
+                const pointerId = e.pointerId;
+                holding = { pointerId, timer: view().setTimeout(() => rightButton(pointerId), HOLD) };
+            }
+        } else button(e, true);
+    };
+
+    const onPointerUp = (e: PointerEvent) => {
+        if (e.pointerType === "touch") {
+            const down = downs.get(e.pointerId);
+            downs.delete(e.pointerId);
+            if (holding?.pointerId === e.pointerId) stopHolding();
+            // a short touch that did not move, alone: a tap - a touch right after it, where it was, and held, is the right button
+            tapped = down && !pinching && fingers.size === 1 && e.type === "pointerup" && e.timeStamp - down.at < TAP
+                && !far(down, e.clientX, e.clientY, STILL) ? { x: e.clientX, y: e.clientY, at: e.timeStamp } : undefined;
+            fingers.delete(e.pointerId);
+            lastTouch.delete(e.pointerId);
+            pinchStart = undefined;
+            if (asButton.delete(e.pointerId)) {
+                tapped = undefined;
+                return; // it was the right button: let go already
+            }
+            if (pinching) {
+                if (fingers.size === 1) pinch("end", 1, 0, 0); // one finger left: the zoom stays as it is
+                if (fingers.size === 0) pinching = false;
+                return;
+            }
+            const id = touches.get(e.pointerId);
+            if (id === undefined) return;
+            flushTouch();
+            touches.delete(e.pointerId);
+            used &= ~(1 << id);
+            touchEvent(e.type === "pointercancel" ? Touch.CANCEL : Touch.END, one(e, id));
+        } else if (e.type === "pointerup") button(e, false);
+    };
+
+    const onPointerMove = (e: PointerEvent) => {
+        if (e.pointerType === "touch") {
+            if (asButton.has(e.pointerId)) return; // the right button: nothing of it moves
+            if (fingers.has(e.pointerId)) fingers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+            // the touch after a tap moved: a drag, not the right button
+            const down = downs.get(e.pointerId);
+            if (holding?.pointerId === e.pointerId && down && far(down, e.clientX, e.clientY, STILL)) stopHolding();
+            if (pinching) {
+                if (fingers.size >= 2 && pinchStart === undefined) return; // a third finger came and went: the pinch stays put
+                if (fingers.size === 2) {
+                    const s = spread();
+                    pinch("move", ratio(s.d), s.x, s.y);
+                }
+                return;
+            }
+            if (pinchStart && fingers.size === 2 && enough(spread().d, pinchStart.d)) {
+                // the whole screen in view: the pinch zooms at once, from where the fingers began
+                scaleFrom = pinchStart.d;
+                pinchBegins();
+                const s = spread();
+                return pinch("move", ratio(s.d), s.x, s.y);
+            }
+            if (!touches.has(e.pointerId)) return;
+            lastTouch.set(e.pointerId, e);
+            touchMoved.set(e.pointerId, e);
+            if (!touchFrame) {
+                touchFrame = true;
+                view().requestAnimationFrame(flushTouch);
+            }
+            return;
+        }
+        if (locked()) {
+            deltaX += e.movementX;
+            deltaY += e.movementY;
+        } else {
+            pointerX = e.clientX;
+            pointerY = e.clientY;
+            moved = true;
+        }
+        later();
+    };
+
+    /** 120ths of a notch: positive - away from the user, up or right; a notch is 100 pixels in Chrome on Windows, 3 lines elsewhere. */
+    const onWheel = (e: WheelEvent) => {
+        e.preventDefault();
+        stamp();
+        const per = e.deltaMode === WheelEvent.DOM_DELTA_PIXEL ? 120 / 100 : e.deltaMode === WheelEvent.DOM_DELTA_LINE ? 120 / 3 : 120;
+        wheelX -= e.deltaX * per;
+        wheelY -= e.deltaY * per;
+        later();
+    };
+
+    const noMenu = (e: Event) => e.preventDefault();
+
+    canvas.addEventListener("pointerdown", onPointerDown);
+    canvas.addEventListener("pointerup", onPointerUp);
+    canvas.addEventListener("pointercancel", onPointerUp);
+    canvas.addEventListener("pointermove", onPointerMove);
+    canvas.addEventListener("wheel", onWheel, { passive: false });
+    canvas.addEventListener("contextmenu", noMenu);
+    canvas.addEventListener("auxclick", noMenu);
+    field.focus({ preventScroll: true });
+
+    // the keyboard on the screen closed by the device - the Back of a phone - while it was asked: the view grows back. The page
+    // gets smaller with the keyboard ( interactive-widget, viewer.html ), its window too: its height without the keyboard is kept
+    const viewport = view().visualViewport;
+    let shrunk = false, full = viewport?.height ?? 0;
+    const onViewport = () => {
+        if (!viewport) return;
+        if (!keyboardOn) {
+            full = viewport.height; // turned, or a window of another size: the height with no keyboard
+            return;
+        }
+        const small = viewport.height < full * 0.85;
+        if (small) shrunk = true;
+        else if (shrunk) {
+            shrunk = false;
+            keyboardOn = false;
+            field.inputMode = "none";
+            self.keyboardChanged(false);
+        }
+    };
+    viewport?.addEventListener("resize", onViewport);
+
+    const self: Input = {
+        focus() {
+            field.focus({ preventScroll: true });
+        },
+        keyboard(on = !keyboardOn) {
+            if (on && !keyboardOn && viewport) full = viewport.height;
+            keyboardOn = on;
+            shrunk = false;
+            field.inputMode = on ? "text" : "none";
+            // the keyboard follows the mode when the field is focused anew
+            field.blur();
+            field.focus({ preventScroll: true });
+            return keyboardOn;
+        },
+        keyboardChanged: () => undefined,
+        touchedAt: () => touched,
+        lockPointer() {
+            field.focus({ preventScroll: true });
+            void canvas.requestPointerLock?.();
+        },
+        moved() {
+            releaseAll();
+            blurred.removeEventListener("blur", releaseAll);
+            blurred = view();
+            blurred.addEventListener("blur", releaseAll);
+        },
+        stop() {
+            releaseAll();
+            stopped = true;
+            if (locked()) canvas.ownerDocument.exitPointerLock();
+            field.removeEventListener("keydown", onKeyDown);
+            field.removeEventListener("paste", onPaste);
+            if (pasteKey) clearTimeout(pasteKey.timer);
+            field.removeEventListener("keyup", onKeyUp);
+            field.removeEventListener("compositionend", onComposed);
+            field.removeEventListener("input", onInput);
+            field.removeEventListener("blur", releaseAll);
+            blurred.removeEventListener("blur", releaseAll);
+            canvas.removeEventListener("pointerdown", onPointerDown);
+            canvas.removeEventListener("pointerup", onPointerUp);
+            canvas.removeEventListener("pointercancel", onPointerUp);
+            canvas.removeEventListener("pointermove", onPointerMove);
+            canvas.removeEventListener("wheel", onWheel);
+            canvas.removeEventListener("contextmenu", noMenu);
+            canvas.removeEventListener("auxclick", noMenu);
+            viewport?.removeEventListener("resize", onViewport);
+            stopHolding();
+            field.remove();
+            touches.clear();
+            touchMoved.clear();
+            fingers.clear();
+            lastTouch.clear();
+        },
+    };
+    return self;
+}

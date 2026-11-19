@@ -1,0 +1,260 @@
+# Builds the program of the machine for Windows, Linux and macOS, its app for Android, and the viewer page. Each build is an artifact of the run; a
+# push to main publishes them as the release of its version.
+
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  host:
+    name: host ( ${{ matrix.name }} )
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            program: adhoc-remotedesk.exe
+            library: libadhoc-crypto-0.1.dll
+          # Windows of 32 bits: Windows 10 on old computers
+          - name: windows-x86
+            os: windows-latest
+            target: i686-pc-windows-msvc
+            program: adhoc-remotedesk.exe
+            library: libadhoc-crypto-0.1.dll
+          # Windows on ARM: Surface, the laptops on Snapdragon - built on a runner of its own kind
+          - name: windows-arm64
+            os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            program: adhoc-remotedesk.exe
+            library: libadhoc-crypto-0.1.dll
+          - name: linux-x64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            program: adhoc-remotedesk
+            library: libadhoc-crypto-0.1.so
+          - name: macos-arm64
+            os: macos-latest
+            target: aarch64-apple-darwin
+            program: adhoc-remotedesk
+            library: libadhoc-crypto-0.1.dylib
+          - name: macos-x64
+            os: macos-latest
+            target: x86_64-apple-darwin
+            program: adhoc-remotedesk
+            library: libadhoc-crypto-0.1.dylib
+    defaults:
+      run:
+        working-directory: host
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: host
+          key: ${{ matrix.target }}
+
+      # PipeWire ( Wayland ), PulseAudio, and clang for the bindings of PipeWire; openh264 is built from its sources by the C++ compiler
+      - name: libraries of Linux
+        if: runner.os == 'Linux'
+        working-directory: .
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config clang libclang-dev libpipewire-0.3-dev libspa-0.2-dev libpulse-dev nasm
+
+      # the assembly of the encryption of WebRTC ( aws-lc ) on Windows
+      - name: NASM
+        if: runner.os == 'Windows'
+        uses: ilammy/setup-nasm@v1
+
+      - name: build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: collect
+        shell: bash
+        run: |
+          mkdir -p ../out
+          cp target/${{ matrix.target }}/release/${{ matrix.program }} ../out/
+          # without the library of encryption the program connects to nobody: no release goes out without it
+          if ! cp target/${{ matrix.target }}/release/${{ matrix.library }} ../out/; then
+            echo "::error::the native library of encryption did not come beside the program; found:"
+            find target -name '${{ matrix.library }}' || true
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: adhoc-remotedesk-${{ matrix.name }}
+          path: out/
+
+  # The app of a phone: the host as its library for the ABIs of phones and of the emulator ( cargo-ndk ), libadhoc-crypto of its
+  # release beside it, and the APK around them
+  android:
+    name: android
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: host
+          key: android
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-ndk
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: gradle/actions/setup-gradle@v5
+        with:
+          gradle-version: current
+
+      # the library of the host, and the one of encryption it opens, for each ABI: under the names the app loads them by
+      - name: libraries
+        working-directory: host
+        run: |
+          set -e
+          for pair in arm64-v8a:aarch64-linux-android:arm64 armeabi-v7a:armv7-linux-androideabi:arm x86_64:x86_64-linux-android:x64; do
+            IFS=: read -r abi target arch <<< "$pair"
+            cargo ndk -t "$abi" --platform 29 rustc --lib --release --crate-type cdylib
+            mkdir -p "../android/src/main/jniLibs/$abi"
+            cp "target/$target/release/libadhoc_remotedesk.so" "../android/src/main/jniLibs/$abi/"
+            curl -fsSL --retry 3 -o "../android/src/main/jniLibs/$abi/libadhoc-crypto-0.1.so" "https://github.com/AdHoc-Protocol/adhoc-crypto/releases/latest/download/adhoc-crypto-android-$arch.so"
+          done
+          ls -lR ../android/src/main/jniLibs
+
+      # the key of the releases, from the secrets of the repository: every APK of the releases installs over the one before
+      - name: build
+        working-directory: android
+        env:
+          KEYSTORE: ${{ secrets.ANDROID_KEYSTORE }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          if [ -n "$KEYSTORE" ]; then
+            echo "$KEYSTORE" | base64 -d > "$RUNNER_TEMP/release.jks"
+            export ANDROID_KEYSTORE_FILE="$RUNNER_TEMP/release.jks"
+          else
+            echo "::warning::no key of the releases in the secrets: the APK is signed by a key of debugging"
+          fi
+          gradle --no-daemon assembleRelease
+          mkdir -p ../out
+          cp build/outputs/apk/release/*.apk ../out/AdHocRemoteDesk.apk
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: android
+          path: out/
+
+  viewer:
+    name: viewer
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: viewer
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/*
+
+      - name: build
+        run: |
+          npm install
+          npm run build
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: viewer
+          path: |
+            viewer/AdHocRemoteDesk.html
+            viewer/viewer.html
+            viewer/viewer.js
+
+  # A push to main that every build passed is published as the release of the version in host/Cargo.toml: v0.1.0. The files of
+  # the release are the builds, packed, under names that stay: a link to releases/latest/download/<name> always gives the newest.
+  # The same version built again replaces the files of its release, and its tag moves to the commit they were built from.
+  release:
+    name: release
+    needs: [host, android, viewer]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+
+      # the program of Windows in a zip; of Linux and macOS in a tar.gz, which keeps it executable ( an artifact loses that ); the page
+      # as it is: AdHocRemoteDesk.html, one file, opened where it is downloaded
+      - name: pack
+        run: |
+          echo "VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' host/Cargo.toml | head -1)" >> "$GITHUB_ENV"
+          mkdir release
+          for d in dist/adhoc-remotedesk-*; do
+            name=$(basename "$d")
+            case "$name" in
+              *windows*) (cd "$d" && zip -q "../../release/$name.zip" ./*) ;;
+              *) chmod +x "$d/adhoc-remotedesk"; tar -czf "release/$name.tar.gz" -C "$d" . ;;
+            esac
+          done
+          cp dist/viewer/AdHocRemoteDesk.html release/
+          cp dist/android/AdHocRemoteDesk.apk release/
+          ls -l release
+
+      - name: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="v$VERSION"
+          notes="Built from ${GITHUB_SHA::7}.
+
+          | File | For |
+          |:--|:--|
+          | \`adhoc-remotedesk-windows-x64.zip\` | the remote computer with Windows |
+          | \`adhoc-remotedesk-windows-x86.zip\` | the remote computer with Windows of 32 bits |
+          | \`adhoc-remotedesk-windows-arm64.zip\` | the remote computer with Windows on ARM |
+          | \`adhoc-remotedesk-linux-x64.tar.gz\` | the remote computer with Linux |
+          | \`adhoc-remotedesk-macos-arm64.tar.gz\` | the remote computer with macOS on Apple silicon |
+          | \`adhoc-remotedesk-macos-x64.tar.gz\` | the remote computer with macOS on Intel |
+          | \`AdHocRemoteDesk.apk\` | the remote phone or tablet with Android 10 or later: it shows its screen |
+          | \`AdHocRemoteDesk.html\` | your device: the page, one file - open it in Chrome or Edge |
+
+          Unpack the program with the library of encryption beside it: it needs it. How to start: [Quick start](https://github.com/${GITHUB_REPOSITORY}#quick-start).
+
+          macOS: download with Terminal, not a browser, and it opens without \"adhoc-remotedesk\" Not Opened. Apple silicon:
+
+          \`\`\`bash
+          mkdir -p ~/adhoc-remotedesk && cd ~/adhoc-remotedesk && curl -L https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/adhoc-remotedesk-macos-arm64.tar.gz | tar -xz && ./adhoc-remotedesk
+          \`\`\`
+
+          Intel: \`adhoc-remotedesk-macos-x64.tar.gz\` in place of \`adhoc-remotedesk-macos-arm64.tar.gz\`. Already downloaded with a browser: [macOS: Not Opened](https://github.com/${GITHUB_REPOSITORY}#macos-not-opened)."
+          git tag -f "$tag"
+          git push -f origin "refs/tags/$tag"
+          if gh release view "$tag" > /dev/null 2>&1; then
+            gh release edit "$tag" --title "AdHoc RemoteDesk $VERSION" --notes "$notes" --latest
+            gh release upload "$tag" release/* --clobber
+          else
+            gh release create "$tag" release/* --title "AdHoc RemoteDesk $VERSION" --notes "$notes" --latest
+          fi

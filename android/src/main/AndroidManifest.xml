@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- AdHoc RemoteDesk on a phone: the host of a computer, showing the screen of the phone to a viewer page -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- the screen stays on while it is shown, when no window can keep it on -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- the sound the phone plays: Android asks for it by the permission of the microphone -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- the marks the viewer draws, shown over the other apps -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
+    <application
+        android:label="AdHoc RemoteDesk"
+        android:icon="@drawable/launcher"
+        android:allowBackup="false"
+        android:allowAudioPlaybackCapture="false"
+        android:theme="@android:style/Theme.DeviceDefault.DayNight">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- text to the computer: the menu of a selection in any app, a share, the button of the notification -->
+        <activity
+            android:name=".SendActivity"
+            android:exported="true"
+            android:label="To the computer"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            <intent-filter>
+                <action android:name="android.intent.action.PROCESS_TEXT" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+                <data android:mimeType="image/*" />
+            </intent-filter>
+        </activity>
+
+        <!-- the pictures the computer copied, as the clipboard of the phone hands them to the apps that paste -->
+        <provider
+            android:name=".ClipProvider"
+            android:authorities="org.unirail.adhoc.remotedesk.clip"
+            android:exported="false"
+            android:grantUriPermissions="true" />
+
+        <!-- a file of the phone to the viewer: the picker of Android, over whatever is on the screen -->
+        <activity
+            android:name=".PickActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
+        <!-- the control from the page: gestures, the buttons of the phone, text into the field in focus -->
+        <service
+            android:name=".ControlService"
+            android:exported="true"
+            android:label="AdHoc RemoteDesk: control from the page"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/control" />
+        </service>
+
+        <service
+            android:name=".HostService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
+    </application>
+</manifest>

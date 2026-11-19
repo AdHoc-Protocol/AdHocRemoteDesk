@@ -1,0 +1,23 @@
+{
+  "name": "adhoc-remotedesk-viewer",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The viewer page of AdHoc RemoteDesk: shows the desktop of a machine and controls it.",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p .",
+    "build": "tsc --noEmit -p . && node build.mjs",
+    "watch": "node build.mjs --watch",
+    "pictures": "node build.mjs --pictures"
+  },
+  "devDependencies": {
+    "@fontsource/coming-soon": "latest",
+    "esbuild": "latest",
+    "jsdom": "latest",
+    "roughjs": "latest",
+    "typescript": "latest"
+  },
+  "dependencies": {
+    "dockview": "^8.9.0",
+    "jsqr": "latest"
+  }
+}

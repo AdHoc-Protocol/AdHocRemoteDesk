@@ -1,0 +1,65 @@
+// The app: no AndroidX, no layouts of XML - the activities of Android and the library of the host, nothing more in the APK. The
+// library comes built into src/main/jniLibs ( the workflow: cargo-ndk, and libadhoc-crypto of its release beside it ).
+
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        // Kotlin is in the plugin of Android itself ( AGP 9 )
+        classpath 'com.android.tools.build:gradle:+'
+    }
+}
+
+apply plugin: 'com.android.application'
+
+repositories {
+    google()
+    mavenCentral()
+}
+
+android {
+    namespace = 'org.unirail.adhoc.remotedesk'
+    compileSdk = 36
+
+    defaultConfig {
+        applicationId = 'org.unirail.adhoc.remotedesk'
+        // Android 10: the sound of the apps ( AudioPlaybackCapture ), the frames to the encoder capped, the parameter sets before each key frame
+        minSdk = 29
+        targetSdk = 36
+        versionCode = 1
+        versionName = '0.1.0'
+    }
+
+    // the key of the releases: its file and password from the environment ( the workflow takes them from the secrets of the
+    // repository ). An APK signed by another key does not install over one of these: without them - a build of a fork, a build here -
+    // it is signed by the key of debugging
+    def keystore = System.getenv('ANDROID_KEYSTORE_FILE')
+    signingConfigs {
+        if (keystore) {
+            release {
+                storeFile = file(keystore)
+                storePassword = System.getenv('ANDROID_KEYSTORE_PASSWORD')
+                keyAlias = System.getenv('ANDROID_KEY_ALIAS') ?: 'remotedesk'
+                keyPassword = System.getenv('ANDROID_KEYSTORE_PASSWORD')
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled = true
+            shrinkResources = true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            signingConfig = keystore ? signingConfigs.release : signingConfigs.debug
+        }
+    }
+
+    packaging {
+        // the libraries unpacked on the phone: the host opens libadhoc-crypto by its path
+        jniLibs {
+            useLegacyPackaging = true
+        }
+    }
+}
