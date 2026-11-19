@@ -1,4 +1,4 @@
-pub mod connection;
 pub mod actor0;
-pub use connection::*;
+pub mod connection;
 pub use actor0::Actor0;
+pub use connection::*;

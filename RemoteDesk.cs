@@ -8,57 +8,57 @@ using org.unirail.Meta;
 namespace org.unirail.RemoteDesk
 {
     /** packs
-        <see cref='AudioPacket'/>ā                     24
-        <see cref='ClipboardEvent'/>Ā                  23
+        <see cref='AudioPacket'/>ā                     1
+        <see cref='ClipboardEvent'/>Ā                  0
         <see cref='FileTransfer'/>Ă
-        <see cref='FileTransfer.Data'/>Ą               26
-        <see cref='FileTransfer.Done'/>ą               27
-        <see cref='FileTransfer.Error'/>Ĉ              30
-        <see cref='FileTransfer.Error.Kind'/>ĳ
-        <see cref='FileTransfer.Metadata'/>ă           25
-        <see cref='FileTransfer.RequestTransfer'/>ć    29
-        <see cref='FileTransfer.Success'/>Ć            28
+        <see cref='FileTransfer.Data'/>Ą               3
+        <see cref='FileTransfer.Done'/>ą               4
+        <see cref='FileTransfer.Error'/>Ĉ              7
+        <see cref='FileTransfer.Error.Kind'/>Ī
+        <see cref='FileTransfer.Metadata'/>ă           2
+        <see cref='FileTransfer.RequestTransfer'/>ć    6
+        <see cref='FileTransfer.Success'/>Ć            5
         <see cref='FractionalCoordinate'/>ÿ
-        <see cref='Machine.ActiveDisplay'/>ħ           33
-        <see cref='Machine.Audience'/>ě                19
-        <see cref='Machine.CursorShape'/>Ĩ             34
-        <see cref='Machine.Denied'/>ġ                  3
-        <see cref='Machine.Display'/>Ħ
-        <see cref='Machine.Elevation'/>ċ               2
-        <see cref='Machine.Elevation.State'/>Ğ
-        <see cref='Machine.HostCursorPosition'/>ĩ      35
-        <see cref='Machine.MicrophoneError'/>ĭ         37
-        <see cref='Machine.VideoFormat'/>Ĥ
-        <see cref='Machine.VideoLayout'/>ĥ             32
-        <see cref='Machine.VideoPacket'/>ģ             31
-        <see cref='Machine.Welcome'/>Ġ                 5
-        <see cref='Reason'/>į
-        <see cref='Viewer.AudioControl'/>Ę             16
-        <see cref='Viewer.ClientResolution'/>ĕ         14
-        <see cref='Viewer.ElevationRequest'/>Ċ         1
-        <see cref='Viewer.EventTime'/>Ĕ                13
-        <see cref='Viewer.Hello'/>ĉ                    0
-        <see cref='Viewer.KeyEvent'/>Č                 6
-        <see cref='Viewer.KeyframeRequest'/>ĝ          21
-        <see cref='Viewer.Mark'/>ğ                     22
-        <see cref='Viewer.Mark.Kind'/>Ģ
-        <see cref='Viewer.MicrophoneControl'/>ę        17
-        <see cref='Viewer.MouseButton'/>ď              9
-        <see cref='Viewer.MouseButton.Button'/>Ĵ
-        <see cref='Viewer.MouseDelta'/>Đ               10
-        <see cref='Viewer.MouseMove'/>Ď                8
-        <see cref='Viewer.MouseWheel'/>đ               11
-        <see cref='Viewer.SelectDisplay'/>Ě            18
-        <see cref='Viewer.TakeControl'/>ė              4
-        <see cref='Viewer.TextEvent'/>č                7
-        <see cref='Viewer.TouchEvent'/>Ē               12
-        <see cref='Viewer.TouchEvent.Kind'/>ĵ
-        <see cref='Viewer.TouchPoint'/>ē
-        <see cref='Viewer.VideoAck'/>Ĝ                 20
-        <see cref='Viewer.VideoControl'/>Ė             15
+        <see cref='Machine.ActiveDisplay'/>Ĥ           32
+        <see cref='Machine.Audience'/>ğ                29
+        <see cref='Machine.CursorShape'/>ĥ             33
+        <see cref='Machine.Denied'/>Ğ                  28
+        <see cref='Machine.Display'/>ģ
+        <see cref='Machine.Elevation'/>Ĩ               36
+        <see cref='Machine.Elevation.State'/>Į
+        <see cref='Machine.HostCursorPosition'/>Ħ      34
+        <see cref='Machine.MicrophoneError'/>ħ         35
+        <see cref='Machine.VideoFormat'/>ġ
+        <see cref='Machine.VideoLayout'/>Ģ             31
+        <see cref='Machine.VideoPacket'/>Ġ             30
+        <see cref='Machine.Welcome'/>ĝ                 27
+        <see cref='Reason'/>ĩ
+        <see cref='Viewer.AudioControl'/>Ė             20
+        <see cref='Viewer.ClientResolution'/>Ĕ         18
+        <see cref='Viewer.ElevationRequest'/>Ĝ         26
+        <see cref='Viewer.EventTime'/>Ē                16
+        <see cref='Viewer.Hello'/>ĉ                    8
+        <see cref='Viewer.KeyEvent'/>Ċ                 9
+        <see cref='Viewer.KeyframeRequest'/>Ě          24
+        <see cref='Viewer.Mark'/>ē                     17
+        <see cref='Viewer.Mark.Kind'/>ĭ
+        <see cref='Viewer.MicrophoneControl'/>ė        21
+        <see cref='Viewer.MouseButton'/>č              12
+        <see cref='Viewer.MouseButton.Button'/>ī
+        <see cref='Viewer.MouseDelta'/>Ď               13
+        <see cref='Viewer.MouseMove'/>Č                11
+        <see cref='Viewer.MouseWheel'/>ď               14
+        <see cref='Viewer.SelectDisplay'/>Ę            22
+        <see cref='Viewer.TakeControl'/>ě              25
+        <see cref='Viewer.TextEvent'/>ċ                10
+        <see cref='Viewer.TouchEvent'/>Đ               15
+        <see cref='Viewer.TouchEvent.Kind'/>Ĭ
+        <see cref='Viewer.TouchPoint'/>đ
+        <see cref='Viewer.VideoAck'/>ę                 23
+        <see cref='Viewer.VideoControl'/>ĕ             19
     */
     /** project
-        <see cref='RemoteDesk'/>ĆěęĿĎ
+        <see cref='RemoteDesk'/>ƧƉǾŨĎ
 
         hosts
         <see cref='Viewer'/>ÿ
@@ -68,9 +68,9 @@ namespace org.unirail.RemoteDesk
         <see cref='Session'/>ÿ
 
         states
-        <see cref='Session.Granting'/>Ă
+        <see cref='Session.Granting'/>Ā
         <see cref='Session.Start'/>ÿ
-        <see cref='Session.Working'/>ă
+        <see cref='Session.Working'/>ā
     */
     public interface RemoteDesk
     {

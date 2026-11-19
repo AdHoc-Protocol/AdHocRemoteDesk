@@ -35,6 +35,67 @@ pub fn prefix(b: &[u8]) -> usize {
     swar(b)
 }
 
+/// Copies `src` ( at most 32 bytes ) to `dst` and tells whether every byte is ASCII, in one pass: the
+/// same word loads are stored and checked - overlapping words of 16, 8, 4 bytes from both ends, never
+/// a byte past either end; no call of `memcpy`. `dst` holds the bytes either way.
+///
+/// # Safety
+/// `dst` has room for `src.len()` bytes and does not overlap `src`.
+#[inline(always)]
+pub unsafe fn copy_short(src: &[u8], dst: *mut u8) -> bool {
+    let n = src.len();
+    let p = src.as_ptr();
+    debug_assert!(n <= 32);
+    // SAFETY: every load is inside `src`, every store inside `dst[..n]` ( the caller )
+    unsafe {
+        if 16 <= n {
+            let (a, z) = ((p as *const u128).read_unaligned(), (p.add(n - 16) as *const u128).read_unaligned());
+            (dst as *mut u128).write_unaligned(a);
+            (dst.add(n - 16) as *mut u128).write_unaligned(z);
+            (a | z) & 0x8080_8080_8080_8080_8080_8080_8080_8080 == 0
+        } else if 8 <= n {
+            let (a, z) = ((p as *const u64).read_unaligned(), (p.add(n - 8) as *const u64).read_unaligned());
+            (dst as *mut u64).write_unaligned(a);
+            (dst.add(n - 8) as *mut u64).write_unaligned(z);
+            (a | z) & HI8 == 0
+        } else if 4 <= n {
+            let (a, z) = ((p as *const u32).read_unaligned(), (p.add(n - 4) as *const u32).read_unaligned());
+            (dst as *mut u32).write_unaligned(a);
+            (dst.add(n - 4) as *mut u32).write_unaligned(z);
+            (a | z) & 0x8080_8080 == 0
+        } else {
+            let mut or = 0u8;
+            for i in 0..n {
+                let x = *p.add(i);
+                *dst.add(i) = x;
+                or |= x;
+            }
+            or < 0x80
+        }
+    }
+}
+
+/// Every byte of `src` ( at most 32 bytes ) is ASCII: the word loads of [`copy_short`] without the
+/// stores - for the side that takes memory only for a string that goes the short way.
+#[inline(always)]
+pub fn is_short(src: &[u8]) -> bool {
+    let n = src.len();
+    let p = src.as_ptr();
+    debug_assert!(n <= 32);
+    // SAFETY: every load is inside `src`
+    unsafe {
+        if 16 <= n {
+            ((p as *const u128).read_unaligned() | (p.add(n - 16) as *const u128).read_unaligned()) & 0x8080_8080_8080_8080_8080_8080_8080_8080 == 0
+        } else if 8 <= n {
+            ((p as *const u64).read_unaligned() | (p.add(n - 8) as *const u64).read_unaligned()) & HI8 == 0
+        } else if 4 <= n {
+            ((p as *const u32).read_unaligned() | (p.add(n - 4) as *const u32).read_unaligned()) & 0x8080_8080 == 0
+        } else {
+            src.iter().fold(0u8, |o, &x| o | x) < 0x80
+        }
+    }
+}
+
 /// The length of `s` in UTF-16 units, what a string's length is on the wire: the ASCII front found
 /// with [`prefix`], the rest counted as the bytes that start a character plus one for every 4-byte
 /// character (two units).
@@ -165,6 +226,192 @@ pub fn varints_to_three(src: &[u8], max_units: usize, out: &mut Vec<u8>) -> (usi
     (i, u)
 }
 
+/// The leading varints of UTF-16 units of `src`, at most `max_units`, into UTF-8 in `out`, every
+/// width in one loop: a word of ASCII at a time, any other unit of one to three varint bytes by
+/// one store of its UTF-8, a surrogate pair whole as one character - mixed text ( Cyrillic with
+/// spaces, CJK with ASCII, emoji ) does not stop at each change of width. Left to the unit by unit
+/// path: a unit cut by the end of `src`, a varint past three bytes or above U+FFFF, a surrogate not
+/// in a pair. A run of one width long enough for its own kernel - [`RUN_SHORT`] bytes of units
+/// below 0x800, [`RUN_WIDE`] units U+0800..=U+FFFF - ends it: the kernel goes on with it. Returns
+/// the bytes taken and the units.
+#[inline(never)]
+pub fn varints_to_utf8(src: &[u8], max_units: usize, out: &mut Vec<u8>) -> (usize, usize) {
+    let n = src.len();
+    // UTF-8 is at most 1.5 bytes a varint byte ( a unit 0x800..=0x3FFF: 2 -> 3 ) and 3 a unit; the
+    // stores write up to 8 bytes at a time
+    out.reserve((n + n / 2).min(max_units.saturating_mul(3)) + 8);
+    let base = out.len();
+    let (s, d) = (src.as_ptr(), out.spare_capacity_mut().as_mut_ptr() as *mut u8);
+    let (mut i, mut u, mut o) = (0usize, 0usize, 0usize);
+    // the run of one width so far: bytes below 0x800, units of three UTF-8 bytes
+    let (mut short, mut wide) = (0usize, 0usize);
+    // SAFETY: every read is checked against `n` first; `o <= 1.5 i` and `o <= 3 u` after each
+    // step, so each store - at most 8 bytes at `o` - stays within the room reserved above
+    unsafe {
+        while u < max_units && i < n && short < RUN_SHORT && wide < RUN_WIDE {
+            let b0 = *s.add(i);
+            if b0 < 0x80 {
+                if i + 8 <= n && u + 8 <= max_units {
+                    let w = (s.add(i) as *const u64).read_unaligned();
+                    if w & HI8 == 0 {
+                        (d.add(o) as *mut u64).write_unaligned(w);
+                        (i, u, o) = (i + 8, u + 8, o + 8);
+                        (short, wide) = (short + 8, 0);
+                        continue;
+                    }
+                }
+                *d.add(o) = b0;
+                (i, u, o) = (i + 1, u + 1, o + 1);
+                (short, wide) = (short + 1, 0);
+                continue;
+            }
+            if n <= i + 1 {
+                break;
+            }
+            let b1 = *s.add(i + 1);
+            let (cp, len) = if b1 < 0x80 {
+                ((b0 as u32 & 0x7F) | (b1 as u32) << 7, 2)
+            } else {
+                if n <= i + 2 {
+                    break;
+                }
+                let b2 = *s.add(i + 2);
+                if 3 < b2 {
+                    break; // past three bytes, or above U+FFFF
+                }
+                ((b0 as u32 & 0x7F) | (b1 as u32 & 0x7F) << 7 | (b2 as u32) << 14, 3)
+            };
+            if cp & 0xF800 == 0xD800 {
+                // a high surrogate and its low one, three varint bytes each: one character
+                if 0xDC00 <= cp || max_units < u + 2 || n < i + 6 {
+                    break;
+                }
+                let (c0, c1, c2) = (*s.add(i + 3), *s.add(i + 4), *s.add(i + 5));
+                if c0 < 0x80 || c1 < 0x80 || 3 < c2 {
+                    break;
+                }
+                let lo = (c0 as u32 & 0x7F) | (c1 as u32 & 0x7F) << 7 | (c2 as u32) << 14;
+                if lo & 0xFC00 != 0xDC00 {
+                    break;
+                }
+                let c = 0x1_0000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                let w = (0xF0 | c >> 18) | (0x80 | (c >> 12) & 0x3F) << 8 | (0x80 | (c >> 6) & 0x3F) << 16 | (0x80 | c & 0x3F) << 24;
+                (d.add(o) as *mut u32).write_unaligned(w.to_le());
+                (i, u, o) = (i + 6, u + 2, o + 4);
+                (short, wide) = (0, 0);
+                continue;
+            }
+            if cp < 0x80 {
+                *d.add(o) = cp as u8; // an overlong varint: the unit as the unit path makes it
+                o += 1;
+                (short, wide) = (short + len, 0);
+            } else if cp < 0x800 {
+                let w = (0xC0 | cp >> 6) | (0x80 | cp & 0x3F) << 8;
+                (d.add(o) as *mut u16).write_unaligned((w as u16).to_le());
+                o += 2;
+                (short, wide) = (short + len, 0);
+            } else {
+                let w = (0xE0 | cp >> 12) | (0x80 | (cp >> 6) & 0x3F) << 8 | (0x80 | cp & 0x3F) << 16;
+                (d.add(o) as *mut u32).write_unaligned(w.to_le());
+                o += 3;
+                (short, wide) = (0, wide + 1);
+            }
+            (i, u) = (i + len, u + 1);
+        }
+        out.set_len(base + o);
+    }
+    (i, u)
+}
+
+/// The leading characters of the UTF-8 `src` ( whole characters from its start ) as the varints of
+/// their UTF-16 units into `dst`, every width in one loop: a word of ASCII at a time, any other
+/// character by one store of its varints ( 2, 2 or 3, two of 3 for a pair ) - mixed text does not
+/// stop at each change of width. Goes while 8 bytes of `dst` are left, and until a run of one width
+/// long enough for its own kernel ( as [`varints_to_utf8`] ). Returns the bytes taken and the bytes
+/// written.
+#[inline(never)]
+pub fn utf8_to_varints(src: &[u8], dst: &mut [u8]) -> (usize, usize) {
+    let (n, room) = (src.len(), dst.len());
+    let (s, d) = (src.as_ptr(), dst.as_mut_ptr());
+    let (mut i, mut o) = (0usize, 0usize);
+    let (mut short, mut wide) = (0usize, 0usize);
+    // SAFETY: `src` is UTF-8 from a character's start: the bytes of a character its lead byte tells
+    // are there; every store - at most 8 bytes at `o` - is within `o + 8 <= room`
+    unsafe {
+        while i < n && o + 8 <= room && short < RUN_SHORT && wide < RUN_WIDE {
+            let b0 = *s.add(i) as u32;
+            if short == 0 && b0 < 0xE0 && i + 16 <= n && 0 < i && !wide_lead(s.add(i)) {
+                break; // a run below U+0800 of 16 bytes at least begins: the vector kernel's
+            }
+            if b0 < 0x80 {
+                if i + 8 <= n {
+                    let w = (s.add(i) as *const u64).read_unaligned();
+                    if w & HI8 == 0 {
+                        (d.add(o) as *mut u64).write_unaligned(w);
+                        (i, o) = (i + 8, o + 8);
+                        (short, wide) = (short + 8, 0);
+                        continue;
+                    }
+                }
+                *d.add(o) = b0 as u8;
+                (i, o) = (i + 1, o + 1);
+                (short, wide) = (short + 1, 0);
+            } else if b0 < 0xE0 {
+                // 0x80..=0x7FF: two bytes in both
+                let cp = (b0 & 0x1F) << 6 | (*s.add(i + 1) as u32 & 0x3F);
+                (d.add(o) as *mut u16).write_unaligned((((0x80 | cp & 0x7F) | (cp >> 7) << 8) as u16).to_le());
+                (i, o) = (i + 2, o + 2);
+                (short, wide) = (short + 2, 0);
+            } else if b0 < 0xF0 {
+                let cp = (b0 & 0x0F) << 12 | (*s.add(i + 1) as u32 & 0x3F) << 6 | (*s.add(i + 2) as u32 & 0x3F);
+                (d.add(o) as *mut u32).write_unaligned(unit3(cp).to_le());
+                i += 3;
+                o += if cp < 0x4000 { 2 } else { 3 };
+                (short, wide) = (0, wide + 1);
+            } else {
+                // a pair: both units 0xD800 and up, three bytes each
+                let c = ((b0 & 0x07) << 18 | (*s.add(i + 1) as u32 & 0x3F) << 12 | (*s.add(i + 2) as u32 & 0x3F) << 6 | (*s.add(i + 3) as u32 & 0x3F)) - 0x1_0000;
+                let w = unit3(0xD800 + (c >> 10)) as u64 | (unit3(0xDC00 + (c & 0x3FF)) as u64) << 24;
+                (d.add(o) as *mut u64).write_unaligned(w.to_le());
+                (i, o) = (i + 4, o + 6);
+                (short, wide) = (0, 0);
+            }
+        }
+    }
+    (i, o)
+}
+
+/// The bytes of a run of characters below U+0800 that end [`varints_to_utf8`] and
+/// [`utf8_to_varints`]: from here the vector kernels ( [`short_to_varints`], [`varints_to_short`],
+/// [`prefix`] ) are faster - 16 bytes a step.
+pub const RUN_SHORT: usize = 16;
+/// The characters U+0800..=U+FFFF in a row that end them: [`three_to_varints`] / [`varints_to_three`]
+/// take such a run in a tighter loop.
+pub const RUN_WIDE: usize = 8;
+
+/// One of the 16 bytes at `p` leads a character of three or four bytes ( 0xE0 and up ).
+///
+/// # Safety
+/// The 16 bytes are readable.
+#[inline(always)]
+unsafe fn wide_lead(p: *const u8) -> bool {
+    let has = |w: u64| {
+        let t = (w & 0xE0E0_E0E0_E0E0_E0E0) ^ 0xE0E0_E0E0_E0E0_E0E0; // 0 where a byte is 111xxxxx
+        t.wrapping_sub(0x0101_0101_0101_0101) & !t & HI8 != 0
+    };
+    has((p as *const u64).read_unaligned()) || has((p.add(8) as *const u64).read_unaligned())
+}
+
+/// The varint of a unit of 0x80 and up in the low bytes of a word: 2 bytes below 0x4000, else 3.
+#[inline(always)]
+fn unit3(u: u32) -> u32 {
+    if u < 0x4000 {
+        (0x80 | u & 0x7F) | (u >> 7) << 8
+    } else {
+        (0x80 | u & 0x7F) | (0x80 | (u >> 7) & 0x7F) << 8 | (u >> 14) << 16
+    }
+}
+
 /// One UTF-16 unit into the UTF-8 of a string being received: a high surrogate waits in `hi` for
 /// its low one, the pair is one character; an unpaired surrogate is U+FFFD - as
 /// `String::from_utf16_lossy` makes it.
@@ -224,7 +471,13 @@ pub fn short_to_varints(src: &[u8], dst: &mut [u8]) -> usize {
     #[cfg(target_arch = "x86_64")]
     if 16 <= lim {
         // SAFETY: SSE2 is part of x86_64, AVX2 is checked; the kernels stay within `lim`
-        let (n, stop) = unsafe { if 32 <= lim && std::is_x86_feature_detected!("avx2") { s2v_avx2(src, dst, lim) } else { s2v_sse2(src, dst, lim) } };
+        let (n, stop) = unsafe {
+            if 32 <= lim && std::is_x86_feature_detected!("avx2") {
+                s2v_avx2(src, dst, lim)
+            } else {
+                s2v_sse2(src, dst, lim)
+            }
+        };
         if stop {
             return n;
         }
@@ -253,7 +506,13 @@ pub fn varints_to_short(src: &[u8], units: usize, out: &mut Vec<u8>) -> (usize, 
     if 16 <= src.len() && 16 <= units {
         // SAFETY: SSE2 is part of x86_64, AVX2 is checked; the kernels stay within `src` and write
         // within the room they reserve
-        let (n, u, stop) = unsafe { if 32 <= src.len() && 32 <= units && std::is_x86_feature_detected!("avx2") { v2s_avx2(src, units, out) } else { v2s_sse2(src, units, out) } };
+        let (n, u, stop) = unsafe {
+            if 32 <= src.len() && 32 <= units && std::is_x86_feature_detected!("avx2") {
+                v2s_avx2(src, units, out)
+            } else {
+                v2s_sse2(src, units, out)
+            }
+        };
         if stop {
             return (n, u);
         }
@@ -319,7 +578,13 @@ fn v2s_swar(src: &[u8], units: usize, out: &mut Vec<u8>) -> (usize, usize) {
         let s = h << 8;
         // 1yyyyyyy 0000xxxx -> 110xxxxy 10yyyyyy; ASCII as it is
         let o = w & !(h | s) | h & (0xC0C0_C0C0_C0C0_C0C0 | w >> 7 & 0x1E1E_1E1E_1E1E_1E1E | w >> 6 & 0x0101_0101_0101_0101) | s & (HI8 | w << 8 & 0x3F3F_3F3F_3F3F_3F3F);
-        let n = if bad != 0 { bad.trailing_zeros() as usize >> 3 } else if cut != 0 { 7 } else { 8 };
+        let n = if bad != 0 {
+            bad.trailing_zeros() as usize >> 3
+        } else if cut != 0 {
+            7
+        } else {
+            8
+        };
         out.extend_from_slice(&o.to_le_bytes()[..n]);
         i += n;
         if n != 0 {
@@ -339,7 +604,14 @@ fn v2s_swar(src: &[u8], units: usize, out: &mut Vec<u8>) -> (usize, usize) {
 unsafe fn s2v_sse2(src: &[u8], dst: &mut [u8], lim: usize) -> (usize, bool) {
     use std::arch::x86_64::*;
     let (sp, dp) = (src.as_ptr(), dst.as_mut_ptr());
-    let (e0, c0, x80, x01, x3f, x1e) = (_mm_set1_epi8(0xE0u8 as i8), _mm_set1_epi8(0xC0u8 as i8), _mm_set1_epi8(0x80u8 as i8), _mm_set1_epi8(1), _mm_set1_epi8(0x3F), _mm_set1_epi8(0x1E));
+    let (e0, c0, x80, x01, x3f, x1e) = (
+        _mm_set1_epi8(0xE0u8 as i8),
+        _mm_set1_epi8(0xC0u8 as i8),
+        _mm_set1_epi8(0x80u8 as i8),
+        _mm_set1_epi8(1),
+        _mm_set1_epi8(0x3F),
+        _mm_set1_epi8(0x1E),
+    );
     let mut i = 0;
     while i + 16 <= lim {
         let v = _mm_loadu_si128(sp.add(i) as *const __m128i);
@@ -369,7 +641,14 @@ unsafe fn s2v_sse2(src: &[u8], dst: &mut [u8], lim: usize) -> (usize, bool) {
 unsafe fn s2v_avx2(src: &[u8], dst: &mut [u8], lim: usize) -> (usize, bool) {
     use std::arch::x86_64::*;
     let (sp, dp) = (src.as_ptr(), dst.as_mut_ptr());
-    let (e0, c0, x80, x01, x3f, x1e) = (_mm256_set1_epi8(0xE0u8 as i8), _mm256_set1_epi8(0xC0u8 as i8), _mm256_set1_epi8(0x80u8 as i8), _mm256_set1_epi8(1), _mm256_set1_epi8(0x3F), _mm256_set1_epi8(0x1E));
+    let (e0, c0, x80, x01, x3f, x1e) = (
+        _mm256_set1_epi8(0xE0u8 as i8),
+        _mm256_set1_epi8(0xC0u8 as i8),
+        _mm256_set1_epi8(0x80u8 as i8),
+        _mm256_set1_epi8(1),
+        _mm256_set1_epi8(0x3F),
+        _mm256_set1_epi8(0x1E),
+    );
     let mut i = 0;
     while i + 32 <= lim {
         let v = _mm256_loadu_si256(sp.add(i) as *const __m256i);
@@ -421,7 +700,14 @@ unsafe fn prev256(v: std::arch::x86_64::__m256i) -> std::arch::x86_64::__m256i {
 unsafe fn v2s_sse2(src: &[u8], units: usize, out: &mut Vec<u8>) -> (usize, usize, bool) {
     use std::arch::x86_64::*;
     let sp = src.as_ptr();
-    let (zero, f0, c0, x80, x01, x3f) = (_mm_setzero_si128(), _mm_set1_epi8(0xF0u8 as i8), _mm_set1_epi8(0xC0u8 as i8), _mm_set1_epi8(0x80u8 as i8), _mm_set1_epi8(1), _mm_set1_epi8(0x3F));
+    let (zero, f0, c0, x80, x01, x3f) = (
+        _mm_setzero_si128(),
+        _mm_set1_epi8(0xF0u8 as i8),
+        _mm_set1_epi8(0xC0u8 as i8),
+        _mm_set1_epi8(0x80u8 as i8),
+        _mm_set1_epi8(1),
+        _mm_set1_epi8(0x3F),
+    );
     let (mut i, mut done) = (0, 0);
     while i + 16 <= src.len() && 16 <= units - done {
         let v = _mm_loadu_si128(sp.add(i) as *const __m128i);
@@ -439,7 +725,13 @@ unsafe fn v2s_sse2(src: &[u8], units: usize, out: &mut Vec<u8>) -> (usize, usize
         let (mh, mf) = (_mm_movemask_epi8(high) as u32, _mm_movemask_epi8(first) as u32);
         let cut = mh & 0x8000; // a varint the next vector goes on with
         let bad = mh & !mf & !cut;
-        let n = if bad != 0 { bad.trailing_zeros() as usize } else if cut != 0 { 15 } else { 16 };
+        let n = if bad != 0 {
+            bad.trailing_zeros() as usize
+        } else if cut != 0 {
+            15
+        } else {
+            16
+        };
         out.reserve(16);
         let len = out.len();
         _mm_storeu_si128(out.as_mut_ptr().add(len) as *mut __m128i, o);
@@ -461,7 +753,14 @@ unsafe fn v2s_sse2(src: &[u8], units: usize, out: &mut Vec<u8>) -> (usize, usize
 unsafe fn v2s_avx2(src: &[u8], units: usize, out: &mut Vec<u8>) -> (usize, usize, bool) {
     use std::arch::x86_64::*;
     let sp = src.as_ptr();
-    let (zero, f0, c0, x80, x01, x3f) = (_mm256_setzero_si256(), _mm256_set1_epi8(0xF0u8 as i8), _mm256_set1_epi8(0xC0u8 as i8), _mm256_set1_epi8(0x80u8 as i8), _mm256_set1_epi8(1), _mm256_set1_epi8(0x3F));
+    let (zero, f0, c0, x80, x01, x3f) = (
+        _mm256_setzero_si256(),
+        _mm256_set1_epi8(0xF0u8 as i8),
+        _mm256_set1_epi8(0xC0u8 as i8),
+        _mm256_set1_epi8(0x80u8 as i8),
+        _mm256_set1_epi8(1),
+        _mm256_set1_epi8(0x3F),
+    );
     let (mut i, mut done) = (0, 0);
     while i + 32 <= src.len() && 32 <= units - done {
         let v = _mm256_loadu_si256(sp.add(i) as *const __m256i);
@@ -472,11 +771,20 @@ unsafe fn v2s_avx2(src: &[u8], units: usize, out: &mut Vec<u8>) -> (usize, usize
         let second = prev256(first);
         let of = _mm256_or_si256(c0, _mm256_or_si256(_mm256_add_epi8(nx, nx), _mm256_and_si256(_mm256_srli_epi16::<6>(v), x01)));
         let os = _mm256_or_si256(x80, _mm256_and_si256(pv, x3f));
-        let o = _mm256_or_si256(_mm256_andnot_si256(_mm256_or_si256(first, second), v), _mm256_or_si256(_mm256_and_si256(of, first), _mm256_and_si256(os, second)));
+        let o = _mm256_or_si256(
+            _mm256_andnot_si256(_mm256_or_si256(first, second), v),
+            _mm256_or_si256(_mm256_and_si256(of, first), _mm256_and_si256(os, second)),
+        );
         let (mh, mf) = (_mm256_movemask_epi8(high) as u32, _mm256_movemask_epi8(first) as u32);
         let cut = mh & 0x8000_0000;
         let bad = mh & !mf & !cut;
-        let n = if bad != 0 { bad.trailing_zeros() as usize } else if cut != 0 { 31 } else { 32 };
+        let n = if bad != 0 {
+            bad.trailing_zeros() as usize
+        } else if cut != 0 {
+            31
+        } else {
+            32
+        };
         out.reserve(32);
         let len = out.len();
         _mm256_storeu_si256(out.as_mut_ptr().add(len) as *mut __m256i, o);
@@ -561,7 +869,13 @@ unsafe fn v2s_neon(src: &[u8], units: usize, out: &mut Vec<u8>) -> (usize, usize
         let (mh, mf) = (nibbles(high), nibbles(first));
         let cut = mh & 0xF000_0000_0000_0000;
         let bad = mh & !mf & !cut;
-        let n = if bad != 0 { bad.trailing_zeros() as usize >> 2 } else if cut != 0 { 15 } else { 16 };
+        let n = if bad != 0 {
+            bad.trailing_zeros() as usize >> 2
+        } else if cut != 0 {
+            15
+        } else {
+            16
+        };
         out.reserve(16);
         let len = out.len();
         vst1q_u8(out.as_mut_ptr().add(len), o);
@@ -585,7 +899,12 @@ fn short(b: &[u8]) -> usize {
     let (n, p) = (b.len(), b.as_ptr());
     if 8 <= n {
         // SAFETY: 8 <= n: [0, 8) and [n - 8, n) are in `b`
-        let (w0, w1) = unsafe { ((p as *const u64).read_unaligned() & 0x8080_8080_8080_8080, (p.add(n - 8) as *const u64).read_unaligned() & 0x8080_8080_8080_8080) };
+        let (w0, w1) = unsafe {
+            (
+                (p as *const u64).read_unaligned() & 0x8080_8080_8080_8080,
+                (p.add(n - 8) as *const u64).read_unaligned() & 0x8080_8080_8080_8080,
+            )
+        };
         if w0 != 0 {
             return (u64::from_le(w0).trailing_zeros() / 8) as usize;
         }
@@ -722,7 +1041,18 @@ mod tests {
 
     #[test]
     fn utf16_len_as_encode_utf16() {
-        for s in ["", "a", "abc", "ελληνικά", "😀", "a😀b", "日本語テキスト", "mixed: ascii, ελληνικά, 😀😀, 漢字", &"x".repeat(1000), &("λ".repeat(77) + "😀")] {
+        for s in [
+            "",
+            "a",
+            "abc",
+            "юникод",
+            "😀",
+            "a😀b",
+            "日本語テキスト",
+            "mixed: ascii, кириллица, 😀😀, 漢字",
+            &"x".repeat(1000),
+            &("ж".repeat(77) + "😀"),
+        ] {
             assert_eq!(utf16_len(s), s.encode_utf16().count(), "{s}");
         }
     }
@@ -767,16 +1097,18 @@ mod tests {
     /// in, is what encode_utf16 counts.
     #[test]
     fn utf16_len_of_every_mix() {
-        let alphabet = ['a', 'λ', '\u{7FF}', '\u{800}', '日', '\u{FFFF}', '😀', '\u{10FFFF}'];
+        let alphabet = ['a', 'ж', '\u{7FF}', '\u{800}', '日', '\u{FFFF}', '😀', '\u{10FFFF}'];
         let mut rnd = 0x2545_F491_4F6C_DD1Du64;
         for len in [0usize, 1, 31, 32, 33, 1000, 4063, 4064, 4065, 9000, 20_000] {
             for weight in [0usize, 2, 7] {
-                let s: String = (0..len).map(|_| {
-                    rnd ^= rnd << 13;
-                    rnd ^= rnd >> 7;
-                    rnd ^= rnd << 17;
-                    alphabet[rnd as usize % (alphabet.len() - weight.min(alphabet.len() - 1))]
-                }).collect();
+                let s: String = (0..len)
+                    .map(|_| {
+                        rnd ^= rnd << 13;
+                        rnd ^= rnd >> 7;
+                        rnd ^= rnd << 17;
+                        alphabet[rnd as usize % (alphabet.len() - weight.min(alphabet.len() - 1))]
+                    })
+                    .collect();
                 assert_eq!(utf16_len(&s), s.encode_utf16().count(), "len {len} weight {weight}");
             }
         }
@@ -791,12 +1123,16 @@ mod tests {
         let mut rnd = 0x9E37_79B9_7F4A_7C15u64;
         let mut cases: Vec<String> = vec![all.iter().collect()];
         for _ in 0..200 {
-            cases.push((0..rnd as usize % 40).map(|_| {
-                rnd ^= rnd << 13;
-                rnd ^= rnd >> 7;
-                rnd ^= rnd << 17;
-                all[rnd as usize % all.len()]
-            }).collect());
+            cases.push(
+                (0..rnd as usize % 40)
+                    .map(|_| {
+                        rnd ^= rnd << 13;
+                        rnd ^= rnd >> 7;
+                        rnd ^= rnd << 17;
+                        all[rnd as usize % all.len()]
+                    })
+                    .collect(),
+            );
         }
         for s in &cases {
             let want = varints(s);
@@ -810,7 +1146,7 @@ mod tests {
             assert_eq!(&out[1..], s.as_bytes());
         }
         // a run stops at what is not of it, on both sides
-        let mixed = "日、本a語λ한";
+        let mixed = "日、本a語ж한";
         let mut dst = vec![0u8; mixed.len()];
         assert_eq!(three_to_varints(mixed.as_bytes(), &mut dst), (9, 8), "日、本: three, two, three");
         let v = varints(mixed);
@@ -818,15 +1154,15 @@ mod tests {
         assert_eq!(varints_to_three(&v, usize::MAX, &mut out), (8, 3));
         assert_eq!(out, "日、本".as_bytes());
         assert_eq!(varints_to_three(&v, 2, &mut Vec::new()), (5, 2), "no more units than asked");
-        assert_eq!(varints_to_three(&varints("λλ"), usize::MAX, &mut Vec::new()), (0, 0), "below U+0800: the short path");
-        assert_eq!(three_to_varints("λ".as_bytes(), &mut [0u8; 8]), (0, 0));
+        assert_eq!(varints_to_three(&varints("жж"), usize::MAX, &mut Vec::new()), (0, 0), "below U+0800: the short path");
+        assert_eq!(three_to_varints("ж".as_bytes(), &mut [0u8; 8]), (0, 0));
         assert_eq!(three_to_varints("日".as_bytes(), &mut [0u8; 2]), (0, 0), "no room");
     }
 
     #[test]
     fn short_both_ways_as_one_unit_at_a_time() {
         let mut rnd = 0x2545_F491_4F6C_DD1Du64;
-        let alphabet = ['a', ' ', '.', 'λ', 'Ω', 'é', 'ß', 'א', 'ع', '\u{7F}', '\u{80}', '\u{7FF}', '\u{800}', '日', '😀'];
+        let alphabet = ['a', ' ', '.', 'ж', 'Я', 'é', 'ß', 'א', 'ع', '\u{7F}', '\u{80}', '\u{7FF}', '\u{800}', '日', '😀'];
         for len in 0..120 {
             for weight in [0usize, 3, 9] {
                 let s: String = (0..len)
@@ -835,7 +1171,11 @@ mod tests {
                         rnd ^= rnd >> 7;
                         rnd ^= rnd << 17;
                         let r = rnd as usize % 16;
-                        if r < weight { ['λ', ' '][r & 1] } else { alphabet[r % alphabet.len()] }
+                        if r < weight {
+                            ['ж', ' '][r & 1]
+                        } else {
+                            alphabet[r % alphabet.len()]
+                        }
                     })
                     .collect();
                 let b = s.as_bytes();
@@ -854,7 +1194,10 @@ mod tests {
                     for cap in [usize::MAX, 0, 7, 8, 9, 17] {
                         let mut out = vec![b'#'];
                         let (got, units) = varints_to_short(&want[at..], cap, &mut out);
-                        assert!(units <= cap && got <= lead_bytes && (lead_bytes - got < 8 || cap - units < 8), "{s:?} back from {from} cap {cap}: {got} of {lead_bytes}");
+                        assert!(
+                            units <= cap && got <= lead_bytes && (lead_bytes - got < 8 || cap - units < 8),
+                            "{s:?} back from {from} cap {cap}: {got} of {lead_bytes}"
+                        );
                         assert!(s.is_char_boundary(from + got), "{s:?} back from {from} cap {cap}: {got} cuts a character");
                         assert_eq!(out[1..], b[from..from + got], "{s:?} back from {from} cap {cap}");
                         assert_eq!(units, s[from..from + got].chars().count(), "{s:?} back from {from} cap {cap}");
@@ -866,7 +1209,10 @@ mod tests {
         // overlong UTF-8
         let mut out = Vec::new();
         assert_eq!(varints_to_short(&[0xC1, 0x00, 0x9F, 0x08, 0x9F, 0x08, 0x9F, 0x08], usize::MAX, &mut out), (0, 0));
-        assert_eq!(varints_to_short(&[b'a', 0x9F, 0x08, b' ', 0x9F, 0x08, 0x9F, 0x08, 0x9F, 0x08, 0xC1, 0x00, 0, 0, 0, 0], usize::MAX, &mut out), (10, 6));
-        assert_eq!(out, "a\u{41F} \u{41F}\u{41F}\u{41F}".as_bytes());
+        assert_eq!(
+            varints_to_short(&[b'a', 0x9F, 0x08, b' ', 0x9F, 0x08, 0x9F, 0x08, 0x9F, 0x08, 0xC1, 0x00, 0, 0, 0, 0], usize::MAX, &mut out),
+            (10, 6)
+        );
+        assert_eq!(out, "aП ППП".as_bytes());
     }
 }

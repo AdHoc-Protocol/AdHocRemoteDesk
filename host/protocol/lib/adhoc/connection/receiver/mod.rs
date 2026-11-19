@@ -147,7 +147,10 @@ pub struct Allocate<T> {
 
 impl<T> Allocate<T> {
     pub const fn new(default: fn(&dyn std::any::Any) -> std::ptr::NonNull<T>) -> Self {
-        Self { set: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()), default }
+        Self {
+            set: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
+            default,
+        }
     }
 
     /// Assigns what gives the place: `scope` is the connection, `downcast_ref` gets it.
@@ -176,7 +179,10 @@ pub struct Free<T> {
 
 impl<T> Free<T> {
     pub const fn new(default: fn(std::ptr::NonNull<T>)) -> Self {
-        Self { set: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()), default }
+        Self {
+            set: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
+            default,
+        }
     }
 
     /// Assigns the end of the place.
@@ -209,7 +215,9 @@ unsafe impl<T: Send> Sync for Arena<T> {}
 
 impl<T> Arena<T> {
     pub const fn new() -> Self {
-        Self { free: parking_lot::Mutex::new(Vec::new()) }
+        Self {
+            free: parking_lot::Mutex::new(Vec::new()),
+        }
     }
 
     /// A place that ended, or a new one.
@@ -570,8 +578,11 @@ impl std::fmt::Display for RxState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("a receive")?;
         if self.in_pack {
-            write!(f, ", the pack in flight:
-{self:?}")?;
+            write!(
+                f,
+                ", the pack in flight:
+{self:?}"
+            )?;
         }
         Ok(())
     }
@@ -808,7 +819,12 @@ impl RxState {
         if 0 <= self.copy_from {
             self.copy_from = 0;
         }
-        let mut rx = Rx { buffer: src, byte_: 0, byte_max: src.len(), st: self };
+        let mut rx = Rx {
+            buffer: src,
+            byte_: 0,
+            byte_max: src.len(),
+            st: self,
+        };
         while rx.byte_ < rx.byte_max {
             if !rx.st.in_pack {
                 if rx.st.capture.is_some() {
@@ -827,7 +843,9 @@ impl RxState {
                 rx.st.copy_from = rx.byte_ as isize; // the id is read: the copy starts here, unless the host defers it
                 if rx.st.pack_clear && !host.clear(id) {
                     // only frames of tunnels with a Noise of their own go in the clear: anything else there is forged
-                    rx.st.error.get_or_insert(RxError::Broken("a record in the clear carries what is not a frame of a tunnel with a Noise of its own"));
+                    rx.st
+                        .error
+                        .get_or_insert(RxError::Broken("a record in the clear carries what is not a frame of a tunnel with a Noise of its own"));
                     rx.st.abandon();
                     return (-1, false);
                 }
@@ -1195,6 +1213,14 @@ impl<'a> Rx<'a> {
 
     // nested
 
+    /// A nested pack of at most `max` bytes is taken in place, with no level of its own: no nested
+    /// pack of this level is cut by the window ( [`try_get_bytes`](Self::try_get_bytes) resumes that
+    /// one ) and the window holds `max` bytes.
+    #[inline(always)]
+    pub fn fits(&self, max: usize) -> bool {
+        self.st.depth <= self.st.level + 1 && max <= self.byte_max - self.byte_
+    }
+
     /// A pack nested in the one being received (`try_get_bytes`): goes one level down and receives
     /// it there. `this_case` — the case of the pack that calls it: a parked nested pack is resumed
     /// from it.
@@ -1239,7 +1265,12 @@ impl<'a> Rx<'a> {
     /// nearer the leaf there.
     #[inline]
     pub fn sub<'b>(&'b mut self, buffer: &'b [u8]) -> Rx<'b> {
-        Rx { buffer, byte_: 0, byte_max: buffer.len(), st: &mut *self.st }
+        Rx {
+            buffer,
+            byte_: 0,
+            byte_max: buffer.len(),
+            st: &mut *self.st,
+        }
     }
 
     // nulls
@@ -1617,7 +1648,8 @@ impl<'a> Rx<'a> {
     /// The bit stream holds `len_bits` more bits (`has_bits`).
     #[inline(always)]
     pub fn has_bits(&self, len_bits: i32) -> bool {
-        len_bits as i64 <= (8 - self.st.bit) as i64 + (((self.byte_max - self.byte_) as i64) << 3) // a window past 256 MB: its bits do not fit an i32
+        len_bits as i64 <= (8 - self.st.bit) as i64 + (((self.byte_max - self.byte_) as i64) << 3)
+        // a window past 256 MB: its bits do not fit an i32
     }
 
     /// `len_bits` bits into `u4`, or the retry at `this_case` (`try_get_bits`).
@@ -1824,8 +1856,16 @@ impl<'a> Rx<'a> {
     pub fn dim_read(&mut self, max: i32, index: usize) -> bool {
         let dim = self.st.u4 as i32;
         if max < dim {
-            crate::lib::adhoc::connection::receiver::on_error::rx_at(crate::lib::adhoc::connection::receiver::on_error::RxOnError::Overflow, &*self.st, &format_args!("In dim(int max, int index){{}} max < dim : {max} < {dim}"), None);
-            self.st.error = Some(RxError::Overflow { got: dim as u32 as u64, max: max as u64 });
+            crate::lib::adhoc::connection::receiver::on_error::rx_at(
+                crate::lib::adhoc::connection::receiver::on_error::RxOnError::Overflow,
+                &*self.st,
+                &format_args!("In dim(int max, int index){{}} max < dim : {max} < {dim}"),
+                None,
+            );
+            self.st.error = Some(RxError::Overflow {
+                got: dim as u32 as u64,
+                max: max as u64,
+            });
             return false;
         }
         self.st.u8 = self.st.u8.wrapping_mul(dim as u64);
@@ -1841,7 +1881,12 @@ impl<'a> Rx<'a> {
         if len <= max {
             return len;
         }
-        crate::lib::adhoc::connection::receiver::on_error::rx_at(crate::lib::adhoc::connection::receiver::on_error::RxOnError::Overflow, &*self.st, &format_args!("In length(long max){{}} max < len : {max} < {len}"), None);
+        crate::lib::adhoc::connection::receiver::on_error::rx_at(
+            crate::lib::adhoc::connection::receiver::on_error::RxOnError::Overflow,
+            &*self.st,
+            &format_args!("In length(long max){{}} max < len : {max} < {len}"),
+            None,
+        );
         self.st.error = Some(RxError::Overflow { got: len as u64, max: max as u64 });
         self.st.u8 = 0;
         0
@@ -1990,25 +2035,33 @@ impl<'a> Rx<'a> {
     }
 
     // string
-
 }
 
 impl RxSlot {
     pub fn check_len0(&mut self, len: i32) -> Result<(), RxError> {
         if self.max_items < self.index_max_0(len) {
-            return Err(RxError::Overflow { got: len as u64, max: self.max_items as u64 });
+            return Err(RxError::Overflow {
+                got: len as u64,
+                max: self.max_items as u64,
+            });
         }
         Ok(())
     }
     pub fn check_len1(&mut self, len: i32) -> Result<(), RxError> {
         if self.max_items < self.index_max_1(len) {
-            return Err(RxError::Overflow { got: len as u64, max: self.max_items as u64 });
+            return Err(RxError::Overflow {
+                got: len as u64,
+                max: self.max_items as u64,
+            });
         }
         Ok(())
     }
     pub fn check_len2(&mut self, len: i32) -> Result<(), RxError> {
         if self.max_items < self.index_max_2(len) {
-            return Err(RxError::Overflow { got: len as u64, max: self.max_items as u64 });
+            return Err(RxError::Overflow {
+                got: len as u64,
+                max: self.max_items as u64,
+            });
         }
         Ok(())
     }
@@ -2047,7 +2100,10 @@ impl<D: BytesDst> RxHost for One<D> {
 impl<D: BytesDst> Virtual<D> {
     /// `id_bytes` - the bytes of a pack id of the protocol.
     pub fn new(id_bytes: i32) -> Self {
-        Self { st: RxState::new(id_bytes), one: One { dst: None, id: 0, whole: false } }
+        Self {
+            st: RxState::new(id_bytes),
+            one: One { dst: None, id: 0, whole: false },
+        }
     }
 
     /// The pack to fill, and its id: before [`write`](Self::write). A pack in progress is dropped.
@@ -2128,7 +2184,16 @@ impl<H: RxHost + Send> Receiver<H> {
     /// on with the parse it kept: the host and the state of the receiver of that socket, the packs
     /// of the agreement first.
     pub fn new(host: H, id_bytes: i32) -> Self {
-        let mut r = Self { host: std::mem::ManuallyDrop::new(host), rx: RxState::new(id_bytes), stop: None, greeting: false, greet_rx: None, speed_mark: 0, speed_at: crate::lib::network::engine::now_nanos(), hollow: false };
+        let mut r = Self {
+            host: std::mem::ManuallyDrop::new(host),
+            rx: RxState::new(id_bytes),
+            stop: None,
+            greeting: false,
+            greet_rx: None,
+            speed_mark: 0,
+            speed_at: crate::lib::network::engine::now_nanos(),
+            hollow: false,
+        };
         let kept = positioned(&*r.host, |p| p.take_parked::<(H, RxState)>()).flatten();
         if let Some((host, rx)) = kept {
             // SAFETY: the fresh host is replaced right away, never used again
@@ -2144,7 +2209,6 @@ impl<H: RxHost + Send> Receiver<H> {
 }
 
 impl<H: RxHost> Receiver<H> {
-
     /// The keys of the session: a ChaCha20 stage of a pack chain finds the key a pack names there.
     pub fn keys(mut self, keys: std::sync::Arc<crate::lib::adhoc::connection::keyring::Keyring>) -> Self {
         self.rx.keys = keys;
@@ -2208,7 +2272,11 @@ impl<H: RxHost> Receiver<H> {
     fn greet(&mut self, src: &[u8]) -> Option<usize> {
         let mut rx = self.greet_rx.take().unwrap_or_else(|| RxState::new(self.rx.id_bytes));
         let stop = std::sync::atomic::AtomicBool::new(false);
-        let mut g = Greeter { host: &mut *self.host, heard: crate::lib::adhoc::connection::control::Heard::Nothing, stop: &stop };
+        let mut g = Greeter {
+            host: &mut *self.host,
+            heard: crate::lib::adhoc::connection::control::Heard::Nothing,
+            stop: &stop,
+        };
         let n = rx.write_all_until(src, &mut g, Some(&stop));
         let heard = g.heard;
         self.greet_rx = Some(rx);
@@ -2238,7 +2306,9 @@ impl<H: RxHost> Receiver<H> {
     fn lose(&mut self, at: i64) {
         self.greeting = false;
         if let Some(id) = positioned(&*self.host, |p| p.id()) {
-            let e = std::io::Error::other(format!("The guaranteed pack {id} was cut by the loss of a connection and is dropped: the journal of the peer does not hold its bytes, its stream goes on from {at}"));
+            let e = std::io::Error::other(format!(
+                "The guaranteed pack {id} was cut by the loss of a connection and is dropped: the journal of the peer does not hold its bytes, its stream goes on from {at}"
+            ));
             self.host.failure(&e);
         }
         dropped(&mut self.rx, &mut *self.host);
@@ -2376,7 +2446,11 @@ impl<H: RxHost + Send> crate::lib::adhoc::BytesDst for Receiver<H> {
         }
         let n = self.rx.write_all_block(block, from, end, &mut *self.host, self.stop.as_deref());
         self.measure();
-        if n < 0 { None } else { Some(from - at + n as usize) }
+        if n < 0 {
+            None
+        } else {
+            Some(from - at + n as usize)
+        }
     }
 
     /// The bytes are parsed where they lie: what a parked relay does not take stays with whoever
@@ -2391,7 +2465,11 @@ impl<H: RxHost + Send> crate::lib::adhoc::BytesDst for Receiver<H> {
         }
         let n = self.rx.write_all_until(&bytes[from..], &mut *self.host, self.stop.as_deref());
         self.measure();
-        if n < 0 { None } else { Some(from + n as usize) }
+        if n < 0 {
+            None
+        } else {
+            Some(from + n as usize)
+        }
     }
 
     /// All of them, or false: a caller that cannot keep what is refused.
@@ -2410,7 +2488,11 @@ impl<H: RxHost + Send> crate::lib::adhoc::BytesDst for Receiver<H> {
         let n = self.rx.write_all_until(bytes, &mut *self.host, self.stop.as_deref());
         self.rx.clear = false;
         self.measure();
-        if n < 0 { None } else { Some(n as usize) }
+        if n < 0 {
+            None
+        } else {
+            Some(n as usize)
+        }
     }
 }
 
@@ -2568,7 +2650,7 @@ mod tests {
 
     #[test]
     fn any_window_size() {
-        let mut stream = wire(0xDEADBEEF, "hello, κόσμε");
+        let mut stream = wire(0xDEADBEEF, "hello, мир");
         stream.extend(wire(3, "x"));
         for window in 1..=stream.len() {
             let mut st = RxState::new(1);
@@ -2576,7 +2658,7 @@ mod tests {
             for chunk in stream.chunks(window) {
                 assert!(st.write_all(chunk, &mut host) >= 0);
             }
-            assert_eq!(host.got, vec![(0xDEADBEEF, Some("hello, κόσμε".to_string())), (3, Some("x".to_string()))], "window {window}");
+            assert_eq!(host.got, vec![(0xDEADBEEF, Some("hello, мир".to_string())), (3, Some("x".to_string()))], "window {window}");
         }
     }
 
@@ -2632,13 +2714,17 @@ mod tests {
     /// it - however the windows cut them; a pack dropped half way is `fail`ed.
     #[test]
     fn a_copy_gets_the_pack_as_it_came() {
-        let packs = [wire(0xDEADBEEF, "hello, κόσμε"), wire(3, "x")];
+        let packs = [wire(0xDEADBEEF, "hello, мир"), wire(3, "x")];
         let stream = packs.concat();
         for headers in [false, true] {
             for window in 1..=stream.len() {
                 let rec: std::sync::Arc<Rec> = Default::default();
                 let mut st = RxState::new(1);
-                let mut host = Copying { p: P { headers, ..P::default() }, rec: rec.clone(), received: 0 };
+                let mut host = Copying {
+                    p: P { headers, ..P::default() },
+                    rec: rec.clone(),
+                    received: 0,
+                };
                 for chunk in stream.chunks(window) {
                     assert!(st.write_all(chunk, &mut host) >= 0);
                 }
@@ -2650,7 +2736,11 @@ mod tests {
         }
         let rec: std::sync::Arc<Rec> = Default::default();
         let mut st = RxState::new(1);
-        let mut host = Copying { p: P::default(), rec: rec.clone(), received: 0 };
+        let mut host = Copying {
+            p: P::default(),
+            rec: rec.clone(),
+            received: 0,
+        };
         assert!(st.write_all(&stream[..8], &mut host) >= 0);
         assert_eq!(rec.cur.lock().unwrap().len(), 7, "passed");
         st.abandon();
@@ -2730,8 +2820,8 @@ pub mod bytes_copy;
 pub mod chunked;
 pub mod framing;
 pub mod on_error;
-pub mod tunnel;
 mod position;
 mod stream;
 mod string;
+pub mod tunnel;
 pub use position::Position;

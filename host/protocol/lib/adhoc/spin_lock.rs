@@ -8,10 +8,7 @@
 //! lists use this lock to allow membership changes during callbacks.
 
 use std::marker::PhantomData;
-use std::sync::atomic::{AtomicU64, AtomicU32, Ordering};
-
-
-
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 // FastReentrantSpinLock
 
@@ -118,7 +115,9 @@ mod tests {
 
     #[test]
     fn guards_cannot_move_to_another_thread() {
-        trait AmbiguousIfSend<A> { fn check() {} }
+        trait AmbiguousIfSend<A> {
+            fn check() {}
+        }
         impl<T: ?Sized> AmbiguousIfSend<()> for T {}
         impl<T: ?Sized + Send> AmbiguousIfSend<u8> for T {}
         // Type inference becomes ambiguous if SpinGuard implements Send.
@@ -137,9 +136,12 @@ mod tests {
         assert_eq!(lock.owner.load(Ordering::Acquire), 0);
         assert_eq!(lock.locks.load(Ordering::Relaxed), 0);
         std::thread::scope(|scope| {
-            scope.spawn(|| {
-                let _guard = lock.lock();
-            }).join().unwrap();
+            scope
+                .spawn(|| {
+                    let _guard = lock.lock();
+                })
+                .join()
+                .unwrap();
         });
     }
 }

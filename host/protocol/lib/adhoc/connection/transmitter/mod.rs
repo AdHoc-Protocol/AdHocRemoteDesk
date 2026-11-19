@@ -504,7 +504,12 @@ impl TxState {
             self.clear = !self.clear; // the pack taken last starts here
         }
         let max = dst.len();
-        let mut tx = Tx { buffer: dst, byte_: 0, byte_max: max, st: self };
+        let mut tx = Tx {
+            buffer: dst,
+            byte_: 0,
+            byte_max: max,
+            st: self,
+        };
         let mut copy_from = 0; // where the bytes of the pack being copied begin in this buffer
         while tx.byte_ < tx.byte_max {
             if !tx.st.in_pack {
@@ -579,7 +584,12 @@ impl TxState {
         }
         let max = dst.len();
         let mut started = false;
-        let mut tx = Tx { buffer: dst, byte_: 0, byte_max: max, st: self };
+        let mut tx = Tx {
+            buffer: dst,
+            byte_: 0,
+            byte_max: max,
+            st: self,
+        };
         if tx.byte_ < tx.byte_max {
             if !tx.st.in_pack {
                 while !tx.st.in_pack {
@@ -843,6 +853,14 @@ impl<'a> Tx<'a> {
         self.put_bytes(handler, this_case)
     }
 
+    /// A nested pack of at most `max` bytes goes in place, with no level of its own: no nested pack of
+    /// this level is cut by a buffer ( [`put_bytes`](Self::put_bytes) resumes that one ) and the buffer
+    /// has room for `max` bytes.
+    #[inline(always)]
+    pub fn fits(&self, max: usize) -> bool {
+        self.st.depth <= self.st.level + 1 && max <= self.byte_max - self.byte_
+    }
+
     /// A pack nested in the one being sent: one level down. `this_case` — the case of the pack that
     /// calls it. A nested pack starts at case 1: its id (case 0) goes only with a pack sent on its
     /// own.
@@ -873,7 +891,12 @@ impl<'a> Tx<'a> {
     #[inline]
     pub fn sub<'b>(&'b mut self, buffer: &'b mut [u8]) -> Tx<'b> {
         let n = buffer.len();
-        Tx { buffer, byte_: 0, byte_max: n, st: &mut *self.st } // the stage writes what it is given
+        Tx {
+            buffer,
+            byte_: 0,
+            byte_max: n,
+            st: &mut *self.st,
+        } // the stage writes what it is given
     }
 
     // nulls
@@ -1129,7 +1152,7 @@ impl<'a> Tx<'a> {
             x = (x & 0x0000_3FFF_0000_3FFF) | ((x << 2) & 0x3FFF_0000_3FFF_0000);
             x = (x & 0x007F_007F_007F_007F) | ((x << 1) & 0x7F00_7F00_7F00_7F00);
             x |= 0x8080_8080_8080_8080 & ((1u64 << (8 * (n - 1))) - 1); // the continuation bits of all but the last byte
-            // SAFETY: `pos + 8 <= byte_max <= buffer.len()` ( `put_raw` )
+                                                                        // SAFETY: `pos + 8 <= byte_max <= buffer.len()` ( `put_raw` )
             unsafe { (self.buffer.as_mut_ptr().add(pos) as *mut [u8; 8]).write_unaligned(x.to_le_bytes()) };
             self.byte_ = pos + n;
             return true;
@@ -1501,7 +1524,6 @@ impl<'a> Tx<'a> {
     }
 
     // string
-
 }
 
 /// A one-shot transmitter of one pack (`Transmitter.Virtual`): it serializes the pack set by
@@ -1706,7 +1728,13 @@ mod tests {
     fn a_copy_gets_the_pack_as_it_went_out() {
         for window in [2usize, 3, 7, 64, 4096] {
             let packs: Vec<Vec<u8>> = (0..5).map(|i| (0..(i * 37 + 5)).map(|j| (j * 7 + i) as u8).collect()).collect();
-            let mut h = Raw { q: packs.clone(), cur: vec![], n: 0, rec: Default::default(), heard: vec![] };
+            let mut h = Raw {
+                q: packs.clone(),
+                cur: vec![],
+                n: 0,
+                rec: Default::default(),
+                heard: vec![],
+            };
             let mut st = TxState::new();
             let mut wire = vec![];
             let mut buf = vec![0u8; window];
@@ -1724,7 +1752,13 @@ mod tests {
             assert!(h.heard.chunks(2).enumerate().all(|(i, w)| w == [("serializing", i), ("serialized", i)]));
         }
         // dropped half way
-        let mut h = Raw { q: vec![vec![9; 100]], cur: vec![], n: 0, rec: Default::default(), heard: vec![] };
+        let mut h = Raw {
+            q: vec![vec![9; 100]],
+            cur: vec![],
+            n: 0,
+            rec: Default::default(),
+            heard: vec![],
+        };
         let mut st = TxState::new();
         let mut buf = vec![0u8; 10];
         assert_eq!(st.read(&mut buf, &mut h), 10);
@@ -1756,7 +1790,13 @@ mod tests {
         let want: Vec<(Vec<u8>, bool)> = packs.iter().map(|p| ([&[1u8, 2][..], p].concat(), p[0] == 7)).collect();
         for window in [3usize, 8, 64, 4096] {
             for one in [false, true] {
-                let mut h = Kinds(Raw { q: packs.clone(), cur: vec![], n: 0, rec: Default::default(), heard: vec![] });
+                let mut h = Kinds(Raw {
+                    q: packs.clone(),
+                    cur: vec![],
+                    n: 0,
+                    rec: Default::default(),
+                    heard: vec![],
+                });
                 let mut st = TxState::new();
                 let mut buf = vec![0u8; window];
                 let (mut clear, mut sealed) = (vec![], vec![]);
@@ -1817,7 +1857,13 @@ mod tests {
         let packs: Vec<Vec<u8>> = (0..6u8).map(|i| vec![i; 3 + i as usize]).collect();
         let kept: Vec<u8> = packs.iter().filter(|p| p[0] % 2 == 0).flat_map(|p| [&[1u8, 2][..], p].concat()).collect();
         for one in [false, true] {
-            let mut h = Dropping(Raw { q: packs.clone(), cur: vec![], n: 0, rec: Default::default(), heard: vec![] });
+            let mut h = Dropping(Raw {
+                q: packs.clone(),
+                cur: vec![],
+                n: 0,
+                rec: Default::default(),
+                heard: vec![],
+            });
             let mut st = TxState::new();
             let (mut wire, mut buf) = (vec![], vec![0u8; 5]);
             loop {
@@ -1943,14 +1989,19 @@ mod tests {
                 }
             }
         }
-        let p = P { a: 0x0102_0304_0506_0708, v: 0x3FFF_FFFF_FFFF, s: Some("virtual: ελληνικά, 日本".into()) };
+        let p = P {
+            a: 0x0102_0304_0506_0708,
+            v: 0x3FFF_FFFF_FFFF,
+            s: Some("virtual: кириллица, 日本".into()),
+        };
         let mut whole = vec![0u8; 4096];
         let mut v = Virtual::new();
         v.set_bytes_src(p.clone());
         let n = v.read(&mut whole);
         assert!(0 < n && v.is_idle() && v.read(&mut whole) == -1);
         whole.truncate(n as usize);
-        for size in 8..=whole.len() { // a fixed value goes whole into one buffer: the u64, 8 bytes
+        for size in 8..=whole.len() {
+            // a fixed value goes whole into one buffer: the u64, 8 bytes
             let mut v = Virtual::new();
             v.set_bytes_src(p.clone());
             let mut out = Vec::new();
@@ -1987,7 +2038,7 @@ mod tests {
             vec![b'a' as u16, 0xD83D, 0xDE00, b'b' as u16],
             vec![0xD83D, 0xD83D, 0xDE00],
             vec![0xD83D, b'x' as u16, 0xDE00],
-            "ελληνικά, 日本, ascii".encode_utf16().collect(),
+            "кириллица, 日本, ascii".encode_utf16().collect(),
             (0..500u16).map(|i| [0x41, 0x436, 0x65E5, 0xD83D, 0xDE00, 0x3FFF, 0x4000][(i % 7) as usize]).collect(),
         ];
         for units in cases {
@@ -2049,7 +2100,12 @@ mod tests {
             for room in [reference.len(), reference.len() + 3, 16, 32] {
                 let mut st = TxState::new();
                 let mut buf = vec![0xAAu8; room];
-                let mut tx = Tx { buffer: &mut buf, byte_: 0, byte_max: room, st: &mut st };
+                let mut tx = Tx {
+                    buffer: &mut buf,
+                    byte_: 0,
+                    byte_max: room,
+                    st: &mut st,
+                };
                 assert!(tx.varint(v), "{v:x} room {room}");
                 assert_eq!(tx.byte_, reference.len());
                 assert_eq!(&buf[..reference.len()], &reference[..], "{v:x} room {room}");
@@ -2187,7 +2243,11 @@ mod tests {
     fn round_trip_any_buffer() {
         let packs = vec![
             P { a: 1, f: 2.5, s: "ascii only".into() },
-            P { a: u32::MAX, f: -0.0, s: "μείγμα ASCII και 😀 emoji".into() },
+            P {
+                a: u32::MAX,
+                f: -0.0,
+                s: "смесь ASCII и 😀 emoji".into(),
+            },
             P { a: 0, f: f64::NAN, s: String::new() },
         ];
         for size in 8..64 {
@@ -2485,9 +2545,19 @@ mod tests {
         if !Z {
             &[]
         } else if id == 0 {
-            &[Stage::Stages(crate::lib::stages::Run { kind1: crate::lib::stages::ZSTD, level1: 3, kind2: 0, level2: 0 })]
+            &[Stage::Stages(crate::lib::stages::Run {
+                kind1: crate::lib::stages::ZSTD,
+                level1: 3,
+                kind2: 0,
+                level2: 0,
+            })]
         } else {
-            &[Stage::Stages(crate::lib::stages::Run { kind1: crate::lib::stages::ZSTD, level1: 6, kind2: 0, level2: 0 })]
+            &[Stage::Stages(crate::lib::stages::Run {
+                kind1: crate::lib::stages::ZSTD,
+                level1: 6,
+                kind2: 0,
+                level2: 0,
+            })]
         }
     }
 
@@ -2559,13 +2629,25 @@ mod tests {
                 x ^= x << 13;
                 x ^= x >> 17;
                 x ^= x << 5;
-                if i % 7 == 0 { 'ω' } else { (b'a' + (x % 26) as u8) as char }
+                if i % 7 == 0 {
+                    'я'
+                } else {
+                    (b'a' + (x % 26) as u8) as char
+                }
             })
             .collect()
     }
 
     fn chain_round_trip<const Z: bool>(sizes: &[usize]) {
-        let o = |n: usize, s: u32| O { head: s as u8, l: L { a: s, s: text(n, s), z: u64::MAX - s as u64 }, tail: 0x0102_0304_0506_0708 ^ s as u64 };
+        let o = |n: usize, s: u32| O {
+            head: s as u8,
+            l: L {
+                a: s,
+                s: text(n, s),
+                z: u64::MAX - s as u64,
+            },
+            tail: 0x0102_0304_0506_0708 ^ s as u64,
+        };
         for &size in sizes {
             let os = vec![o(0, 1), o(10, 2), o(70_000, 3), o(200_000, 4)];
             let qs = vec![Q { o: o(5, 5), end: 77 }, Q { o: o(150_000, 6), end: u32::MAX }];
@@ -2586,7 +2668,13 @@ mod tests {
                 wire.extend_from_slice(&buf[..n as usize]);
             }
             let mut rs = RxState::new(1);
-            let mut inp = InC::<Z> { id: 0, o: O::default(), q: Q::default(), got_o: vec![], got_q: vec![] };
+            let mut inp = InC::<Z> {
+                id: 0,
+                o: O::default(),
+                q: Q::default(),
+                got_o: vec![],
+                got_q: vec![],
+            };
             for w in wire.chunks(size) {
                 assert!(rs.write_all(w, &mut inp) >= 0, "zstd {Z} buffer {size}: {:?}", rs.error);
             }
@@ -2741,10 +2829,20 @@ mod tests {
 
     fn stream_round_trip<const Z: bool>(sizes: &[usize]) {
         for &size in sizes {
-            let packs: Vec<(u8, Vec<u8>, u32)> =
-                vec![(1, vec![], 7), (2, text(10, 2).into_bytes(), 8), (3, text(100_000, 3).into_bytes(), u32::MAX), (4, vec![0; 300_000], 0)];
+            let packs: Vec<(u8, Vec<u8>, u32)> = vec![(1, vec![], 7), (2, text(10, 2).into_bytes(), 8), (3, text(100_000, 3).into_bytes(), u32::MAX), (4, vec![0; 300_000], 0)];
             let mut st = TxState::new();
-            let mut out = OutS::<Z> { q: packs.iter().map(|(h, d, t)| Sp { head: *h, data: d.clone(), got: Default::default(), tail: *t }).collect(), cur: None };
+            let mut out = OutS::<Z> {
+                q: packs
+                    .iter()
+                    .map(|(h, d, t)| Sp {
+                        head: *h,
+                        data: d.clone(),
+                        got: Default::default(),
+                        tail: *t,
+                    })
+                    .collect(),
+                cur: None,
+            };
             let mut wire = Vec::new();
             let mut buf = vec![0u8; size];
             let mut zero = 0;
@@ -2992,7 +3090,11 @@ mod tests {
             let packs: Vec<Ss<Z, U>> = vec![
                 Ss { a: 1, s: String::new(), b: 7 },
                 Ss { a: 2, s: "ascii".into(), b: 8 },
-                Ss { a: 3, s: "μείγμα και 😀 emoji ".repeat(9000), b: u32::MAX },
+                Ss {
+                    a: 3,
+                    s: "смесь и 😀 emoji ".repeat(9000),
+                    b: u32::MAX,
+                },
                 Ss { a: 4, s: text(150_000, 9), b: 0 },
             ];
             let mut st = TxState::new();
@@ -3025,7 +3127,7 @@ mod tests {
 
     /// The string of the field, then the fragments of `strs` after it: one string on the wire.
     fn fragments_round_trip<const Z: bool, const U: bool>(sizes: &[usize]) {
-        let parts: Vec<String> = vec!["".into(), "μείγμα και 😀 ".repeat(3000), "a".into(), text(70_000, 5), "".into(), "τέλος".into()];
+        let parts: Vec<String> = vec!["".into(), "смесь и 😀 ".repeat(3000), "a".into(), text(70_000, 5), "".into(), "конец".into()];
         for &size in sizes {
             let mut st = TxState::new();
             let mut left = parts.clone().into_iter();
@@ -3056,7 +3158,10 @@ mod tests {
             for w in wire.chunks(size) {
                 assert!(rs.write_all(w, &mut inp) >= 0, "zstd {Z} utf {U} buffer {size}: {:?}", rs.error);
             }
-            let whole = Ss::<Z, U> { s: String::from("head ") + &parts.concat(), ..head };
+            let whole = Ss::<Z, U> {
+                s: String::from("head ") + &parts.concat(),
+                ..head
+            };
             assert!(inp.got == vec![whole], "zstd {Z} utf {U} buffer {size}");
         }
     }
@@ -3090,14 +3195,17 @@ mod tests {
                         Some(spent)
                     })
                 });
-                let mut out = OutSs::<false, U> { q: vec![Ss { a: 1, s: String::new(), b: 2 }], cur: None };
+                let mut out = OutSs::<false, U> {
+                    q: vec![Ss { a: 1, s: String::new(), b: 2 }],
+                    cur: None,
+                };
                 let t = std::time::Instant::now();
                 while 0 <= st.read(&mut buf, &mut out) {}
                 best = best.min(t.elapsed().as_secs_f64());
             }
             println!("{what:<44} {:>8.0} MB/s", bytes as f64 / best / 1e6);
         }
-        for (name, piece) in [("ASCII", "a1b2c3d4".repeat(512)), ("Greek", "δοκιμασία".repeat(256)), ("CJK", "漢字の試験".repeat(273))] {
+        for (name, piece) in [("ASCII", "a1b2c3d4".repeat(512)), ("Cyrillic", "проверка".repeat(256)), ("CJK", "漢字の試験".repeat(273))] {
             let parts: Vec<String> = (0..25_000).map(|_| piece.clone()).collect();
             run::<true>(&format!("UTF-8 wire, {name}, moved"), &parts, true);
             run::<true>(&format!("UTF-8 wire, {name}, copied into the buffer"), &parts, false);
@@ -3118,7 +3226,29 @@ mod tests {
             self.0.on_serialized()
         }
         fn chain(id: u32) -> &'static [Stage] {
-            if id == 0 { &[Stage::Stages(crate::lib::stages::Run { kind1: crate::lib::stages::CHACHA20_PACK, level1: 0, kind2: 0, level2: 0 })] } else { &[Stage::Stages(crate::lib::stages::Run { kind1: crate::lib::stages::CHACHA20_PACK, level1: 0, kind2: 0, level2: 0 }), Stage::Stages(crate::lib::stages::Run { kind1: crate::lib::stages::CHACHA20_PACK, level1: 0, kind2: 0, level2: 0 })] }
+            if id == 0 {
+                &[Stage::Stages(crate::lib::stages::Run {
+                    kind1: crate::lib::stages::CHACHA20_PACK,
+                    level1: 0,
+                    kind2: 0,
+                    level2: 0,
+                })]
+            } else {
+                &[
+                    Stage::Stages(crate::lib::stages::Run {
+                        kind1: crate::lib::stages::CHACHA20_PACK,
+                        level1: 0,
+                        kind2: 0,
+                        level2: 0,
+                    }),
+                    Stage::Stages(crate::lib::stages::Run {
+                        kind1: crate::lib::stages::CHACHA20_PACK,
+                        level1: 0,
+                        kind2: 0,
+                        level2: 0,
+                    }),
+                ]
+            }
         }
     }
 
@@ -3142,7 +3272,15 @@ mod tests {
     fn chain_chacha_round_trip() {
         use crate::lib::adhoc::connection::keyring::Key;
         let key = Key::new(1, std::array::from_fn(|i| i as u8), std::array::from_fn(|i| (i * 7) as u8));
-        let o = |n: usize, s: u32| O { head: s as u8, l: L { a: s, s: text(n, s), z: u64::MAX - s as u64 }, tail: 0x0102_0304_0506_0708 ^ s as u64 };
+        let o = |n: usize, s: u32| O {
+            head: s as u8,
+            l: L {
+                a: s,
+                s: text(n, s),
+                z: u64::MAX - s as u64,
+            },
+            tail: 0x0102_0304_0506_0708 ^ s as u64,
+        };
         for size in [16usize, 17, 23, 64, 1000, 70_000] {
             let os = vec![o(0, 1), o(10, 2), o(70_000, 3)];
             let qs = vec![Q { o: o(5, 5), end: 77 }, Q { o: o(150_000, 6), end: u32::MAX }];
@@ -3162,7 +3300,13 @@ mod tests {
             }
             let mut rs = RxState::new(1);
             rs.keys.add(key.clone());
-            let mut inp = InK(InC::<false> { id: 0, o: O::default(), q: Q::default(), got_o: vec![], got_q: vec![] });
+            let mut inp = InK(InC::<false> {
+                id: 0,
+                o: O::default(),
+                q: Q::default(),
+                got_o: vec![],
+                got_q: vec![],
+            });
             for w in wire.chunks(size) {
                 assert!(rs.write_all(w, &mut inp) >= 0, "buffer {size}: {:?}", rs.error);
             }
@@ -3181,7 +3325,15 @@ mod tests {
         use crate::lib::adhoc::connection::keyring::Key;
         let known = Key::new(1, std::array::from_fn(|i| i as u8), std::array::from_fn(|i| (i * 7) as u8));
         let unknown = Key::new(2, std::array::from_fn(|i| (i * 3) as u8), std::array::from_fn(|i| (i * 5) as u8));
-        let o = |n: usize, s: u32| O { head: s as u8, l: L { a: s, s: text(n, s), z: u64::MAX - s as u64 }, tail: 0x0102_0304_0506_0708 ^ s as u64 };
+        let o = |n: usize, s: u32| O {
+            head: s as u8,
+            l: L {
+                a: s,
+                s: text(n, s),
+                z: u64::MAX - s as u64,
+            },
+            tail: 0x0102_0304_0506_0708 ^ s as u64,
+        };
         let os = vec![o(0, 1), o(10, 2), o(3000, 3)];
         let qs = vec![Q { o: o(5, 5), end: 77 }];
         let wire_of = |key: &Key| {
@@ -3206,7 +3358,13 @@ mod tests {
         for size in [16usize, 64, 1000, 1 << 16] {
             let mut rs = RxState::new(1);
             rs.keys.add(known.clone());
-            let mut inp = InK(InC::<false> { id: 0, o: O::default(), q: Q::default(), got_o: vec![], got_q: vec![] });
+            let mut inp = InK(InC::<false> {
+                id: 0,
+                o: O::default(),
+                q: Q::default(),
+                got_o: vec![],
+                got_q: vec![],
+            });
             for w in wire.chunks(size) {
                 assert!(rs.write_all(w, &mut inp) >= 0, "buffer {size}: {:?}", rs.error);
             }
@@ -3274,7 +3432,6 @@ mod tests {
     fn a_file_whose_source_ends_early_is_an_error() {
         file_wire(20, 10, 100);
     }
-
 }
 
 pub mod broadcaster;
@@ -3282,6 +3439,6 @@ pub mod chunked;
 pub mod framing;
 pub mod on_error;
 pub mod resumable;
-pub mod tunnel;
 mod stream;
 mod string;
+pub mod tunnel;

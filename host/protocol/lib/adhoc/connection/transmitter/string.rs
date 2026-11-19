@@ -27,6 +27,16 @@ impl Tx<'_> {
     pub fn put_string(&mut self, src: &str, max: u32, this_case: u32) -> bool {
         let b = src.as_bytes();
         let (n, at) = (b.len(), self.byte_);
+        // a string of up to 32 bytes: copied and checked for ASCII by the same word loads - no call of
+        // memcpy, no second pass. One that is not ASCII goes the way below, which writes over them
+        if self.st.str_phase == 0 && n <= 32 && n < self.byte_max - at && n <= max as usize {
+            // SAFETY: `at + 1 + n <= byte_max <= buffer.len()` ( `put_raw` ); `b` is not in `buffer`
+            if unsafe { crate::lib::adhoc::ascii::copy_short(b, self.buffer.as_mut_ptr().add(at + 1)) } {
+                self.buffer[at] = n as u8;
+                self.byte_ = at + 1 + n;
+                return true;
+            }
+        }
         // the common case first: a short ASCII string whole in the buffer - its length is one byte,
         // each of its bytes the varint of its unit; no state, one copy
         if self.st.str_phase == 0 && n < 0x80 && n < self.byte_max - at && crate::lib::adhoc::ascii::prefix(b) == n {
@@ -52,7 +62,7 @@ impl Tx<'_> {
         if self.st.str_phase == 0 {
             let (units, ascii) = crate::lib::adhoc::ascii::utf16_len_ascii(src);
             self.st.str_ascii = ascii;
-            if ( max as usize ) < units {
+            if (max as usize) < units {
                 overflow("a string", units as u64, max as u64); // above the limit of the description: nothing of it goes
             }
             self.st.str_pos = 0;
@@ -108,7 +118,11 @@ impl Tx<'_> {
             // looked for only as far as the buffer takes: a long string goes out in many buffers,
             // and a search to its end in each of them is quadratic
             let lim = (pos + room).min(bytes.len());
-            let run_end = if pos < self.st.str_ascii { self.st.str_ascii.min(lim) } else { pos + crate::lib::adhoc::ascii::prefix(&bytes[pos..lim]) };
+            let run_end = if pos < self.st.str_ascii {
+                self.st.str_ascii.min(lim)
+            } else {
+                pos + crate::lib::adhoc::ascii::prefix(&bytes[pos..lim])
+            };
             if pos < run_end {
                 let n = (run_end - pos).min(room);
                 self.buffer[self.byte_..self.byte_ + n].copy_from_slice(&bytes[pos..pos + n]);
@@ -130,6 +144,17 @@ impl Tx<'_> {
                 // a run of characters U+0800..=U+FFFF: three bytes each in UTF-8, two or three in
                 // varints
                 let (n, w) = crate::lib::adhoc::ascii::three_to_varints(&bytes[pos..], &mut self.buffer[self.byte_..self.byte_max]);
+                if 0 < n {
+                    self.byte_ += w;
+                    pos += n;
+                    continue;
+                }
+            }
+            // the rest of every width in one loop: surrogate pairs, short runs and the changes of
+            // width of mixed text - not a character at a time; a last character of two bytes goes
+            // the way below, cheaper for one
+            if pos + 2 < bytes.len() {
+                let (n, w) = crate::lib::adhoc::ascii::utf8_to_varints(&bytes[pos..], &mut self.buffer[self.byte_..self.byte_max]);
                 if 0 < n {
                     self.byte_ += w;
                     pos += n;
@@ -208,7 +233,7 @@ impl Tx<'_> {
         if self.st.depth <= level {
             // a new stream
             let units = crate::lib::adhoc::ascii::utf16_len(src);
-            if ( max as usize ) < units {
+            if (max as usize) < units {
                 overflow("a string", units as u64, max as u64);
             }
             if self.st.slots.len() <= level {
@@ -219,7 +244,14 @@ impl Tx<'_> {
         }
         let mut strs = self.st.strs.take();
         let done = {
-            let TxChain { stages, terminator, str_pos, frag, on_frag, .. } = &mut ch;
+            let TxChain {
+                stages,
+                terminator,
+                str_pos,
+                frag,
+                on_frag,
+                ..
+            } = &mut ch;
             self.chain_body(stages, terminator, &mut |t: &mut Tx<'_>| {
                 if !*on_frag {
                     if !str_leaf(t, src, utf, str_pos) {
@@ -296,7 +328,13 @@ pub(crate) fn str_leaf(dst: &mut Tx<'_>, s: &str, utf: bool, pos: &mut usize) ->
     }
     #[inline]
     fn len(u: u16) -> usize {
-        if u < 0x80 { 1 } else if u < 0x4000 { 2 } else { 3 }
+        if u < 0x80 {
+            1
+        } else if u < 0x4000 {
+            2
+        } else {
+            3
+        }
     }
     while *pos < b.len() {
         // a run of ASCII, as far as the window takes: each byte its own varint
@@ -329,6 +367,16 @@ pub(crate) fn str_leaf(dst: &mut Tx<'_>, s: &str, utf: bool, pos: &mut usize) ->
                 continue;
             }
         }
+        // the rest of every width in one loop ( surrogate pairs, mixed text ); a last character of
+        // two bytes goes below
+        if *pos + 2 < b.len() {
+            let (n, w) = crate::lib::adhoc::ascii::utf8_to_varints(&b[*pos..], &mut dst.buffer[dst.byte_..dst.byte_max]);
+            if 0 < n {
+                dst.byte_ += w;
+                *pos += n;
+                continue;
+            }
+        }
         if room == 0 {
             return false;
         }
@@ -352,4 +400,60 @@ pub(crate) fn str_leaf(dst: &mut Tx<'_>, s: &str, utf: bool, pos: &mut usize) ->
         *pos += c.len_utf8();
     }
     true
+}
+
+#[cfg(test)]
+mod leaf_tests {
+    use super::*;
+
+    /// The leaf of a chain writes each UTF-16 unit as its varint, characters of every width mixed,
+    /// at any window: the bytes the windows give, one after another, are the units' varints.
+    #[test]
+    fn the_leaf_writes_units_of_every_width_at_any_window() {
+        let mut s = 0x2545_F491_4F6C_DD1Du64;
+        let mut rnd = |n: u64| {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            s % n
+        };
+        let classes = [(0u32, 0x80u32), (0x80, 0x780), (0x800, 0x3800), (0x4000, 0x9800), (0xE000, 0x2000), (0x1_0000, 0x10_0000)];
+        for round in 0..400 {
+            let mut text = String::new();
+            for _ in 0..rnd(80) {
+                let (from, span) = classes[rnd(classes.len() as u64) as usize];
+                let c = char::from_u32(from + rnd(span as u64) as u32).unwrap();
+                let run = if rnd(2) == 0 { 1 } else { 24 };
+                for _ in 0..1 + rnd(run) {
+                    text.push(c);
+                }
+            }
+            let mut want = Vec::new();
+            for u in text.encode_utf16() {
+                let mut v = u as u32;
+                while 0x7F < v {
+                    want.push(v as u8 | 0x80);
+                    v >>= 7;
+                }
+                want.push(v as u8);
+            }
+            for window in [6usize, 7, 8, 9, 13, 16, 31, 64, 1000] {
+                let mut got = Vec::new();
+                let mut pos = 0;
+                let mut buf = vec![0u8; window];
+                let mut st = TxState::new();
+                loop {
+                    let mut tx = Tx::new(&mut buf, &mut st);
+                    let done = str_leaf(&mut tx, &text, false, &mut pos);
+                    let n = tx.byte_;
+                    got.extend_from_slice(&buf[..n]);
+                    if done {
+                        break;
+                    }
+                    assert!(0 < n, "{round}: window {window} makes no progress");
+                }
+                assert_eq!(got, want, "{round}: window {window}");
+            }
+        }
+    }
 }

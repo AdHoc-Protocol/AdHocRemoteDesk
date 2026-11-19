@@ -49,8 +49,10 @@ fn rank_below(nulls: &BitList, ranks: &[usize], count: usize, i: usize) -> usize
     }
 }
 
-/// `ranks` from word `from` (`<= ranks.len()`) on made anew from `nulls`, one `popcnt` a word.
+/// `ranks` from word `from` on made anew from `nulls`, one `popcnt` a word - from the last word
+/// ranked when `from` is past them ( lazy ranks ).
 fn ranks_from(nulls: &BitList, ranks: &mut Vec<usize>, from: usize) {
+    let from = from.min(ranks.len());
     ranks.truncate(from);
     let mut r = match from.checked_sub(1) {
         Some(p) => ranks[p] + nulls.get64(p << 6).count_ones() as usize,
@@ -76,7 +78,14 @@ impl<T> NullableObjectList<T> {
     /// Does not allocate.
     #[inline]
     pub const fn new() -> Self {
-        Self { repr: Repr::Compressed { nulls: BitList::new(), values: Vec::new(), ranks: Vec::new() }, flat_threshold: DEFAULT_FLAT_THRESHOLD }
+        Self {
+            repr: Repr::Compressed {
+                nulls: BitList::new(),
+                values: Vec::new(),
+                ranks: Vec::new(),
+            },
+            flat_threshold: DEFAULT_FLAT_THRESHOLD,
+        }
     }
 
     /// Room for `capacity` values.
@@ -91,10 +100,14 @@ impl<T> NullableObjectList<T> {
         }
     }
 
-    /// `len` nulls.
+    /// `len` nulls: no fill pass, no ranks yet.
     pub fn with_nulls(len: usize) -> Self {
         Self {
-            repr: Repr::Compressed { nulls: BitList::filled(false, len), values: Vec::new(), ranks: vec![0; len.div_ceil(64)] },
+            repr: Repr::Compressed {
+                nulls: BitList::filled(false, len),
+                values: Vec::new(),
+                ranks: Vec::new(),
+            },
             flat_threshold: DEFAULT_FLAT_THRESHOLD,
         }
     }
@@ -256,8 +269,40 @@ impl<T> NullableObjectList<T> {
         }
     }
 
+    /// A received value at `i` - past every index set before, as a receiver fills a list in order,
+    /// the length set ahead ( `set_len` ) or not - and its place, to be filled further. The items
+    /// skipped since the last value are not written: their bits are 0, nulls by themselves.
+    /// Compressed, the value goes after all the others: no rank to find, nothing to move.
+    #[inline]
+    pub fn append(&mut self, i: usize, value: T) -> &mut T {
+        if !self.is_flat() && self.cardinality() >= self.flat_threshold {
+            self.make_flat();
+        }
+        match &mut self.repr {
+            Repr::Flat { items, count } => {
+                if i >= items.len() {
+                    items.resize_with(i + 1, || None);
+                }
+                *count += 1;
+                items[i].insert(value)
+            }
+            Repr::Compressed { nulls, values, ranks } => {
+                ranks_to(ranks, values.len(), i + 1);
+                nulls.set1(i);
+                if (i >> 6) + 1 < ranks.len() {
+                    // ranked past `i` ( after `insert` / `remove` ): the words after it got a value before them
+                    for x in &mut ranks[(i >> 6) + 1..] {
+                        *x += 1;
+                    }
+                }
+                values.push(value);
+                values.last_mut().unwrap()
+            }
+        }
+    }
+
     /// Appends: compressed - the value to the end of `values` (its place is the number of values,
-    /// no rank), a rank for a word begun; flat - `Vec::push`.
+    /// no rank), a rank for the word of a value; flat - `Vec::push`.
     #[inline]
     pub fn push(&mut self, value: Option<T>) {
         if value.is_some() && !self.is_flat() && self.cardinality() >= self.flat_threshold {
@@ -269,8 +314,8 @@ impl<T> NullableObjectList<T> {
                 items.push(value);
             }
             Repr::Compressed { nulls, values, ranks } => {
-                if nulls.len() & 63 == 0 {
-                    ranks.push(values.len()); // a word begun
+                if value.is_some() {
+                    ranks_to(ranks, values.len(), nulls.len() + 1); // the word of a value ranked ( lazy: a null needs none )
                 }
                 nulls.push(value.is_some());
                 if let Some(v) = value {
@@ -374,9 +419,7 @@ impl<T> NullableObjectList<T> {
                 if len < nulls.len() {
                     values.truncate(rank_below(nulls, ranks, values.len(), len));
                     ranks.truncate(len.div_ceil(64));
-                } else {
-                    ranks_to(ranks, values.len(), len);
-                }
+                } // grown: nulls, no ranks ( lazy ) - a receiver sets the length ahead and puts only the values, in order
                 nulls.set_len(len);
             }
         }
@@ -762,12 +805,84 @@ impl<T> IntoIterator for NullableObjectList<T> {
 
 #[cfg(test)]
 impl<T> NullableObjectList<T> {
-    /// `ranks` as `nulls` makes them: one per word begun.
+    /// `ranks` as `nulls` makes them: one per word from the first up to the word of the last value
+    /// at least and none past the words begun ( lazy ).
     pub(crate) fn assert_ranks(&self) {
         if let Repr::Compressed { nulls, values, ranks } = &self.repr {
             let want: Vec<usize> = (0..nulls.len().div_ceil(64)).map(|k| if k == 0 { 0 } else { nulls.rank((k << 6) - 1) }).collect();
-            assert_eq!(*ranks, want, "ranks");
+            let need = nulls.last_one().map_or(0, |i| (i >> 6) + 1);
+            assert!(
+                need <= ranks.len() && ranks.len() <= want.len(),
+                "ranks: {} of {}, the last value in word {need}",
+                ranks.len(),
+                want.len()
+            );
+            assert_eq!(ranks[..], want[..ranks.len()], "ranks");
             assert_eq!(values.len(), nulls.count_ones(), "values");
+        }
+    }
+}
+
+#[cfg(test)]
+mod append_tests {
+    use super::*;
+
+    fn rnd(s: &mut u64) -> u64 {
+        *s ^= *s << 13;
+        *s ^= *s >> 7;
+        *s ^= *s << 17;
+        *s
+    }
+
+    /// Receiver order: ascending indices, only the values by `append` ( its place filled after ) -
+    /// against `set`, the length set ahead and not, every strategy; then edits over the lazy ranks.
+    #[test]
+    fn append_matches_set() {
+        for threshold in [1024usize, 0, 7] {
+            for preset in [true, false] {
+                let mut s = threshold as u64 * 2 + preset as u64 + 3;
+                for _ in 0..300 {
+                    let n = (rnd(&mut s) % 2000) as usize;
+                    let dens = rnd(&mut s) % 101;
+                    let (mut a, mut b) = (NullableObjectList::<String>::new(), NullableObjectList::<String>::new());
+                    a.set_flat_threshold(threshold);
+                    b.set_flat_threshold(threshold);
+                    if preset {
+                        a.set_len(n);
+                    }
+                    for i in 0..n {
+                        if rnd(&mut s) % 100 < dens {
+                            let x = (rnd(&mut s) % 1000).to_string();
+                            a.append(i, String::new()).push_str(&x);
+                            b.set(i, Some(x));
+                        }
+                    }
+                    a.set_len(n);
+                    b.set_len(n);
+                    a.assert_ranks();
+                    for i in 0..n {
+                        assert_eq!(a.get(i), b.get(i), "threshold {threshold} preset {preset} n {n} i {i}");
+                    }
+                    for _ in 0..20.min(n) {
+                        if a.is_empty() {
+                            break;
+                        }
+                        let i = (rnd(&mut s) % a.len() as u64) as usize;
+                        if rnd(&mut s) % 2 == 0 {
+                            a.set(i, Some("x".to_string()));
+                            b.set(i, Some("x".to_string()));
+                        } else {
+                            a.remove(i);
+                            b.remove(i);
+                        }
+                        a.assert_ranks();
+                    }
+                    assert_eq!(a.len(), b.len());
+                    for i in 0..a.len() {
+                        assert_eq!(a.get(i), b.get(i));
+                    }
+                }
+            }
         }
     }
 }
